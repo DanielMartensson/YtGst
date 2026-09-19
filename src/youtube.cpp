@@ -1,4 +1,5 @@
 #include "youtube.h"
+#include "ytdlp.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -269,7 +270,7 @@ void Youtube::enrichPending()
         return;
     m_enrichCursor = batch.last() + 1;
 
-    const QString executable = QStandardPaths::findExecutable(QStringLiteral("yt-dlp"));
+    const QString executable = ytDlpExecutable();
     if (executable.isEmpty())
         return;
 

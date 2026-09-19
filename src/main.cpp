@@ -9,7 +9,7 @@
 #include <gst/gst.h>
 
 // Startar spelaren som en egen process med ett eget QQuickWindow/GL-kontext.
-// Huvudfönstret ("Ytgst") förblir öppet medan "Ytgst Player" spelar.
+// Huvudfönstret ("YtGst") förblir öppet medan "YtGst Player" spelar.
 class Launcher : public QObject
 {
     Q_OBJECT
@@ -28,13 +28,39 @@ public:
 
 int main(int argc, char *argv[])
 {
-    // VA-API: iHD-drivern initieras inte på denna maskin (Haswell);
-    // välj i965 om den finns, så vah264dec (hårdvaruavkodning) fungerar.
-    if (QFile::exists(QStringLiteral("/usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so"))) {
+    // VA-API-drivrutin: använd CMake-flaggan YTGST_VAAPI_DRIVER om den är satt,
+    // annars auto-väljs i965 om den finns (Haswell), så vah264dec fungerar.
+#ifdef YTGST_VAAPI_DRIVER
+    const QString configuredVa = QStringLiteral(YTGST_VAAPI_DRIVER);
+#else
+    const QString configuredVa;
+#endif
+    if (!configuredVa.isEmpty()) {
+        qputenv("LIBVA_DRIVER_NAME", configuredVa.toUtf8());
+    } else if (QFile::exists(QStringLiteral("/usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so"))) {
         qputenv("LIBVA_DRIVER_NAME", "i965");
     }
 
     gst_init(&argc, &argv);
+
+    // Prioritera vald videodekoder (YTGST_VIDEO_DECODER, t.ex. vah264dec)
+    // framför övriga, så playbin väljer hårdvaruavkodning i första hand.
+#ifdef YTGST_VIDEO_DECODER
+    {
+        const QByteArray decoder = QByteArrayLiteral(YTGST_VIDEO_DECODER);
+        if (!decoder.isEmpty()) {
+            GstRegistry *registry = gst_registry_get();
+            GstPluginFeature *feature = gst_registry_lookup_feature(registry, decoder.constData());
+            if (feature) {
+                gst_plugin_feature_set_rank(feature, GST_RANK_PRIMARY + 1);
+                gst_object_unref(feature);
+            } else {
+                qWarning("Videodekodern \"%s\" hittades inte – använder standard",
+                         decoder.constData());
+            }
+        }
+    }
+#endif
 
     // qml6glsink-pluginet MÅSTE laddas innan QML-motorn skapas,
     // för att registrera GstGLQt6VideoItem-typen i QML.

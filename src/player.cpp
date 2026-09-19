@@ -1,4 +1,5 @@
 #include "player.h"
+#include "ytdlp.h"
 
 #include <QRunnable>
 
@@ -249,7 +250,7 @@ void Player::download()
         return;
     }
 
-    const QString executable = QStandardPaths::findExecutable(QStringLiteral("yt-dlp"));
+    const QString executable = ytDlpExecutable();
     if (executable.isEmpty()) {
         setDownloadStatus(tr("yt-dlp not found"));
         return;
@@ -356,7 +357,7 @@ void Player::play(const QString &videoId)
 
 void Player::requestUrls()
 {
-    const QString executable = QStandardPaths::findExecutable(QStringLiteral("yt-dlp"));
+    const QString executable = ytDlpExecutable();
     if (executable.isEmpty()) {
         m_loading = false;
         emit loadingChanged();
