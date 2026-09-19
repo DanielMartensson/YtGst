@@ -17,7 +17,7 @@ Window {
     }
 
     function openVideo(video) {
-        launcher.play(video.id);
+        launcher.play(video.id, video.title);
     }
 
     Youtube {

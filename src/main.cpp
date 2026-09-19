@@ -16,12 +16,13 @@ class Launcher : public QObject
 public:
     using QObject::QObject;
 
-    Q_INVOKABLE void play(const QString &videoId)
+    Q_INVOKABLE void play(const QString &videoId, const QString &title)
     {
         if (videoId.isEmpty())
             return;
         QProcess::startDetached(QCoreApplication::applicationFilePath(),
-                                {QStringLiteral("--play"), videoId});
+                                {QStringLiteral("--play"), videoId,
+                                 QStringLiteral("--title"), title});
     }
 };
 
@@ -49,10 +50,14 @@ int main(int argc, char *argv[])
     QGuiApplication app(argc, argv);
 
     QString playId;
+    QString playTitle;
     const QStringList args = QCoreApplication::arguments();
     const int playIndex = args.indexOf(QStringLiteral("--play"));
     if (playIndex >= 0 && playIndex + 1 < args.size())
         playId = args.at(playIndex + 1);
+    const int titleIndex = args.indexOf(QStringLiteral("--title"));
+    if (titleIndex >= 0 && titleIndex + 1 < args.size())
+        playTitle = args.at(titleIndex + 1);
 
     Launcher launcher;
 
@@ -72,6 +77,7 @@ int main(int argc, char *argv[])
             root->setProperty("standalone", true);
             root->setProperty("visible", true);
             root->setProperty("videoId", playId);
+            root->setProperty("videoTitle", playTitle);
         }
     }
 

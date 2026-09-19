@@ -12,7 +12,7 @@ Window {
     minimumHeight: 360
     visible: false
     color: "#0b0b0c"
-    title: qsTr("Ytgst Player")
+    title: videoTitle.length > 0 ? videoTitle : qsTr("Ytgst Player")
 
     property string videoId: ""
     property string videoTitle: ""
