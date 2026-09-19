@@ -7,7 +7,7 @@ Window {
     width: 900
     height: 600
     visible: true
-    title: qsTr("Ytgst")
+    title: qsTr("YtGst")
     color: "#0b0b0c"
 
     property string errorMessage: ""
