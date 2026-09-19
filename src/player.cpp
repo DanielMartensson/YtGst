@@ -2,6 +2,7 @@
 
 #include <QRunnable>
 
+#include <QFile>
 #include <QGuiApplication>
 #include <QDir>
 #include <QHash>
@@ -98,6 +99,32 @@ static QString formatForHeight(int height)
             .arg(height);
     }
     return QStringLiteral("bestvideo[protocol^=m3u8]+bestaudio[protocol^=m3u8]/bestvideo+bestaudio/best");
+}
+
+// Väljer en installerad webbläsare att hämta YouTube-cookies ifrån.
+static QString browserForCookies()
+{
+    const QString home = QDir::homePath();
+    static const struct { const char *name; const char *dir; } browsers[] = {
+        {"firefox", "/.mozilla/firefox"},
+        {"chromium", "/.config/chromium"},
+        {"chrome", "/.config/google-chrome"},
+        {"brave", "/.config/BraveSoftware/Brave-Browser"},
+        {"edge", "/.config/microsoft-edge"},
+        {"vivaldi", "/.config/vivaldi"},
+        {"opera", "/.config/opera"},
+    };
+    for (const auto &browser : browsers) {
+        if (QDir(home + QLatin1String(browser.dir)).exists())
+            return QString::fromLatin1(browser.name);
+    }
+    return QString();
+}
+
+// Tillfällig cookie-jar som yt-dlp skriver; läses in och raderas direkt efteråt.
+static QString cookieFilePath()
+{
+    return QDir::tempPath() + QStringLiteral("/ytgst-cookies.txt");
 }
 
 // Sätter User-Agent på playbins interna källa (playbin har ingen skrivbar
@@ -313,6 +340,7 @@ void Player::play(const QString &videoId)
     }
     m_cues.clear();
     m_activeCue = -1;
+    m_cueCache.clear();
     setSubtitleText(QString());
     if (!m_subtitleTracks.isEmpty()) {
         m_subtitleTracks.clear();
@@ -339,12 +367,46 @@ void Player::requestUrls()
     m_loading = true;
     emit loadingChanged();
 
-    const QStringList arguments{
+    QStringList arguments{
         QStringLiteral("-f"), formatForHeight(m_requestedHeight),
         QStringLiteral("-j"), QStringLiteral("--no-warnings"),
-        m_watchUrl,
     };
+    // Cookies krävs för automatiska/översatta undertexter (annars HTTP 429).
+    const QString browser = browserForCookies();
+    if (!browser.isEmpty()) {
+        arguments << QStringLiteral("--cookies-from-browser") << browser
+                  << QStringLiteral("--cookies") << cookieFilePath();
+    }
+    arguments << m_watchUrl;
     m_urlFetch.start(executable, arguments);
+}
+
+void Player::readCookiesFromFile()
+{
+    m_cookieHeader.clear();
+    const QString path = cookieFilePath();
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+
+    QStringList pairs;
+    while (!file.atEnd()) {
+        const QByteArray line = file.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith('#'))
+            continue;
+        const QList<QByteArray> parts = line.split('\t');
+        if (parts.size() < 7)
+            continue;
+        const QString domain = QString::fromUtf8(parts.at(0));
+        if (!domain.endsWith(QLatin1String("youtube.com"))
+            && !domain.endsWith(QLatin1String("google.com")))
+            continue;
+        pairs.append(QStringLiteral("%1=%2")
+                         .arg(QString::fromUtf8(parts.at(5)), QString::fromUtf8(parts.at(6))));
+    }
+    file.close();
+    QFile::remove(path);
+    m_cookieHeader = pairs.join(QStringLiteral("; ")).toUtf8();
 }
 
 void Player::setResolution(int height)
@@ -374,6 +436,7 @@ void Player::setSubtitleLanguage(const QString &language)
         m_subtitleReply->deleteLater();
         m_subtitleReply = nullptr;
     }
+    m_subtitleRetries = 0;
 
     m_cues.clear();
     m_activeCue = -1;
@@ -382,28 +445,57 @@ void Player::setSubtitleLanguage(const QString &language)
     if (language.isEmpty() || m_watchUrl.isEmpty())
         return;
 
-    QString url;
-    bool autoCaptions = false;
+    // Redan hämtad? Använd cachen (undviker onödiga anrop och 429-throttling).
+    const auto cached = m_cueCache.constFind(language);
+    if (cached != m_cueCache.constEnd()) {
+        m_cues = cached.value();
+        updateSubtitleCue();
+        return;
+    }
+
+    m_subtitleUrl.clear();
+    m_subtitleAuto = false;
     for (const QVariant &entry : m_subtitleTracks) {
         const QVariantMap track = entry.toMap();
         if (track.value(QStringLiteral("code")).toString() != language)
             continue;
-        url = track.value(QStringLiteral("json3")).toString();
-        if (url.isEmpty())
-            url = track.value(QStringLiteral("vtt")).toString();
-        autoCaptions = track.value(QStringLiteral("auto")).toBool();
+        m_subtitleUrl = track.value(QStringLiteral("json3")).toString();
+        if (m_subtitleUrl.isEmpty())
+            m_subtitleUrl = track.value(QStringLiteral("vtt")).toString();
+        m_subtitleAuto = track.value(QStringLiteral("auto")).toBool();
         break;
     }
-    if (url.isEmpty())
+    if (m_subtitleUrl.isEmpty())
         return;
 
-    QNetworkRequest request{QUrl(url)};
+    fetchSubtitle();
+}
+
+void Player::fetchSubtitle()
+{
+    if (m_subtitleUrl.isEmpty())
+        return;
+
+    if (m_subtitleReply) {
+        m_subtitleReply->abort();
+        m_subtitleReply->deleteLater();
+        m_subtitleReply = nullptr;
+    }
+
+    QNetworkRequest request{QUrl(m_subtitleUrl)};
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                                      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"));
+    request.setRawHeader("Referer", "https://www.youtube.com/");
+    request.setRawHeader("Origin", "https://www.youtube.com");
+    if (!m_cookieHeader.isEmpty()
+        && QUrl(m_subtitleUrl).host().endsWith(QLatin1String("youtube.com")))
+        request.setRawHeader("Cookie", m_cookieHeader);
     m_subtitleReply = m_net->get(request);
     QNetworkReply *reply = m_subtitleReply;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, autoCaptions]() {
+    const QString language = m_subtitleLanguage;
+    const bool autoCaptions = m_subtitleAuto;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, language, autoCaptions]() {
         if (m_subtitleReply != reply) {
             reply->deleteLater();
             return;
@@ -412,8 +504,30 @@ void Player::setSubtitleLanguage(const QString &language)
         const QByteArray data = reply->readAll();
         const bool ok = reply->error() == QNetworkReply::NoError;
         reply->deleteLater();
-        if (ok && !data.isEmpty())
+
+        if (language != m_subtitleLanguage)
+            return;
+
+        if (ok && !data.isEmpty()) {
             handleSubtitleData(data, autoCaptions);
+            if (!m_cues.isEmpty()) {
+                m_cueCache.insert(language, m_cues);
+                return;
+            }
+        }
+
+        // Tillfällig 429/throttling – försök igen med stigande väntetid.
+        if (m_subtitleRetries < 3) {
+            ++m_subtitleRetries;
+            const int delay = 1200 * m_subtitleRetries;
+            QTimer::singleShot(delay, this, [this, language]() {
+                if (language == m_subtitleLanguage && !m_subtitleReply)
+                    fetchSubtitle();
+            });
+            return;
+        }
+
+        setSubtitleText(tr("Undertexten kunde inte hämtas"));
     });
 }
 
@@ -717,6 +831,7 @@ void Player::updateProgress()
 void Player::handleFetchOutput()
 {
     const QByteArray output = m_urlFetch.readAllStandardOutput();
+    readCookiesFromFile();
     const QJsonObject obj = QJsonDocument::fromJson(output).object();
 
     // Tillgängliga sökbara upplösningar (HLS-videoströmmar), högst först.
@@ -743,9 +858,33 @@ void Player::handleFetchOutput()
     // Tillgängliga undertextspår (manuella först, sedan automatiska).
     QVariantList tracks;
     QSet<QString> seen;
+    QSet<QString> names;
     const QJsonObject manualSubs = obj.value(QStringLiteral("subtitles")).toObject();
     const QJsonObject autoSubs = obj.value(QStringLiteral("automatic_captions")).toObject();
-    const auto addTracks = [&tracks, &seen](const QJsonObject &source, bool autoCaptions) {
+
+    // json3-URL per språkkod; används även som reserv för regionala varianter
+    // (t.ex. "de-DE") som annars bara erbjuds som m3u8-playlist.
+    const auto collectJson3 = [](const QJsonObject &source) {
+        QHash<QString, QString> map;
+        for (auto it = source.constBegin(); it != source.constEnd(); ++it) {
+            for (const QJsonValue &value : it.value().toArray()) {
+                const QJsonObject format = value.toObject();
+                if (format.value(QStringLiteral("ext")).toString() != QLatin1String("json3"))
+                    continue;
+                const QString url = format.value(QStringLiteral("url")).toString();
+                if (!url.isEmpty())
+                    map.insert(it.key(), url);
+                break;
+            }
+        }
+        return map;
+    };
+    const QHash<QString, QString> manualJson3 = collectJson3(manualSubs);
+    const QHash<QString, QString> autoJson3 = collectJson3(autoSubs);
+
+    const auto addTracks = [&tracks, &seen, &names](const QJsonObject &source,
+                                                    const QHash<QString, QString> &json3Map,
+                                                    bool autoCaptions) {
         for (auto it = source.constBegin(); it != source.constEnd(); ++it) {
             const QString code = it.key();
             if (code.isEmpty() || seen.contains(code))
@@ -764,23 +903,33 @@ void Player::handleFetchOutput()
                 else if (ext == QLatin1String("vtt") && vtt.isEmpty())
                     vtt = url;
             }
+            if (json3.isEmpty()) {
+                const QString base = code.section(QLatin1Char('-'), 0, 0).toLower();
+                const auto baseIt = json3Map.constFind(base);
+                if (baseIt != json3Map.constEnd())
+                    json3 = baseIt.value();
+            }
             if (json3.isEmpty() && vtt.isEmpty())
                 continue;
+            const QString name =
+                autoCaptions
+                    ? QStringLiteral("%1 (%2)").arg(languageName(code), QObject::tr("auto"))
+                    : languageName(code);
+            if (names.contains(name))
+                continue;
             seen.insert(code);
+            names.insert(name);
             QVariantMap track;
             track.insert(QStringLiteral("code"), code);
-            track.insert(QStringLiteral("name"),
-                         autoCaptions
-                             ? QStringLiteral("%1 (%2)").arg(languageName(code), QObject::tr("auto"))
-                             : languageName(code));
+            track.insert(QStringLiteral("name"), name);
             track.insert(QStringLiteral("auto"), autoCaptions);
             track.insert(QStringLiteral("json3"), json3);
             track.insert(QStringLiteral("vtt"), vtt);
             tracks.append(track);
         }
     };
-    addTracks(manualSubs, false);
-    addTracks(autoSubs, true);
+    addTracks(manualSubs, manualJson3, false);
+    addTracks(autoSubs, autoJson3, true);
     if (tracks != m_subtitleTracks) {
         m_subtitleTracks = tracks;
         emit subtitleTracksChanged();

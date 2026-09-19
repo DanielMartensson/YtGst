@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QProcess>
@@ -109,6 +110,8 @@ private:
     void parseJsonSubtitles(const QByteArray &data, bool autoCaptions);
     void updateSubtitleCue();
     void setSubtitleText(const QString &text);
+    void fetchSubtitle();
+    void readCookiesFromFile();
     void setDownloadStatus(const QString &status);
     void readDownloadOutput();
     void buildPipeline();
@@ -140,7 +143,12 @@ private:
     QVariantList m_subtitleTracks;
     QString m_subtitleLanguage;
     QString m_subtitleText;
+    QString m_subtitleUrl;
+    bool m_subtitleAuto = false;
+    int m_subtitleRetries = 0;
+    QHash<QString, QList<SubtitleCue>> m_cueCache;
     QList<SubtitleCue> m_cues;
+    QByteArray m_cookieHeader;
     int m_activeCue = -1;
     double m_volume = 1.0;
     bool m_muted = false;
