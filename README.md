@@ -1,416 +1,368 @@
 # YtGst
 
-YtGst är en liten YouTube-spelare för Linux som bygger på tre byggstenar:
+A lightweight YouTube player for Linux.
 
-- **yt-dlp** hämtar information och ström-länkar från YouTube.
-- **GStreamer** avkodar och spelar upp ljud och bild.
-- **Qt 6 / QML** ritar hela gränssnittet och videon på skärmen.
+YtGst has two windows:
 
-Målet är en enkel, snabb spelare som lägger så lite arbete som möjligt på
-processorn (CPU) genom att använda **grafikkortet (GPU)** både för att avkoda
-och för att visa videon. Appen är gjord för vanliga skrivbordsdatorer med
-Linux, ett fungerande grafikkort och drivrutiner.
+- **YtGst** – the search window.
+- **YtGst Player** – the player window, opened as a separate process so the
+  search window stays open.
 
-Appen består av två fönster:
+It is built from three parts:
 
-1. **YtGst** – sökfönstret. Här söker du och får en lista med videokort.
-2. **YtGst Player** – spelfönstret. Det öppnas som en **egen process** när du
-   klickar på en video, så att sökfönstret kan ligga kvar öppet samtidigt.
+| Part | Role |
+| --- | --- |
+| **yt-dlp** | Fetches metadata and stream URLs from YouTube |
+| **GStreamer** | Decodes and plays audio and video |
+| **Qt 6 / QML** | Draws the interface and the video |
 
----
+The goal is GPU-accelerated playback: hardware video decoding (VA-API) and
+GPU rendering through OpenGL, so the CPU does as little work as possible.
+Software rendering is never the intention.
 
-## Innehåll
+## How it works
 
-- [Funktioner](#funktioner)
-- [Så funkar det – yt-dlp → GStreamer → Qt](#så-funkar-det--yt-dlp--gstreamer--qt)
-- [Rendering, GPU och prestanda](#rendering-gpu-och-prestanda)
-- [Beroenden](#beroenden)
-- [Installera yt-dlp](#installera-yt-dlp)
-- [Var hamnar nedladdade filer?](#var-hamnar-nedladdade-filer)
-- [Bygg och kör](#bygg-och-kör)
-- [Kompileringsflaggor](#kompileringsflaggor)
-- [Kodstruktur](#kodstruktur)
-- [Undertexter](#undertexter)
-- [Tangentbord och mus](#tangentbord-och-mus)
-- [Felsökning](#felsökning)
-- [Kända begränsningar](#kända-begränsningar)
+1. **Search.** `src/youtube.cpp` queries YouTube's internal "Innertube" API
+   with Qt Network. The JSON reply is parsed into `VideoListModel`, which QML
+   draws as video cards.
+2. **Play.** Clicking a card starts a new process with `--play <video-id>`.
+   That process runs `yt-dlp -j` to get metadata and stream URLs, then builds a
+   GStreamer pipeline from two `playbin` elements: one for video, one for audio.
+   They share a clock, which keeps audio and video in sync.
+3. **Render.** The video branch is
 
----
+   ```text
+   glupload → glcolorconvert → capsfilter (RGBA) → qml6glsink
+   ```
 
-## Funktioner
-
-- Sökning direkt mot YouTube (via YouTubes egna interna API, "Innertube").
-- Oändlig listning (fler resultat laddas när du scrollar).
-- Videokort med miniatyr, titel, kanal, visningar, ålder och längd.
-- Gilla-markeringar hämtas i bakgrunden för de kort du ser.
-- Uppspelning i eget fönster med:
-  - play/paus, seekbar med tidsbubbla och "scrub",
-  - uppspelningshastighet (0,25x–2x),
-  - upplösningsval (Auto + tillgängliga nivåer),
-  - undertexter (manuella och automatiskt översatta),
-  - volymreglage och mute,
-  - fullskärm,
-  - nedladdning av videon till disk.
-- Styrningen tonas ut automatiskt efter 5 sekunder utan musrörelse.
-
----
-
-## Så funkar det – yt-dlp → GStreamer → Qt
-
-YtGst blandar tre program. Den enklaste beskrivningen är att **yt-dlp är
-"letaren"**, **GStreamer är "motorn"** och **Qt är "ritaren"**.
-
-### 1. Sökfönstret (YtGst)
-
-`src/youtube.cpp` skickar en sökfråga till YouTubes interna söktjänst med
-Qt:s nätverksklass `QNetworkAccessManager`. Svaret är JSON som plockas isär och
-läggs in i en lista (`VideoListModel`). QML ritar listan som videokort.
-
-### 2. Spelaren (YtGst Player)
-
-När du klickar på ett kort startas en ny YtGst-process med argumentet
-`--play <video-id>`. Spelarprocessen gör då följande:
-
-1. **yt-dlp** körs med flaggan `-j` ("dump JSON"). Den returnerar all metadata
-   om videon, inklusive färdiga **ström-länkar** för bild och ljud, samt
-   undertextspår. YtGst föredrar YouTubes **HLS-strömmar** (`.m3u8`) eftersom
-   GStreamer kan spola (seeka) i dem.
-2. **GStreamer** bygger en pipeline av två `playbin`-element:
-   - en för **bild** och en för **ljud**. De delar samma klocka, vilket ger
-     synkron ljud och bild,
-   - bildströmmen skickas genom
-     `glupload → glcolorconvert → capsfilter (RGBA) → qml6glsink`.
-     `qml6glsink` lämnar över varje bildruta till ett QML-element av typen
-     `GstGLQt6VideoItem` som ligger i spelarfönstret.
-3. **Qt / QML** ritar videoytan och alla knappar, menyer och undertexter ovanpå.
-
-Förenklat flöde:
+   `qml6glsink` hands each frame to a `GstGLQt6VideoItem` placed inside the QML
+   player window. Qt / QML draws the controls and subtitles on top.
 
 ```text
-Sökfönstret "YtGst"
-   |  klick på video
-   v
-Nytt "YtGst Player"-fönster (egen process)
-   |
-   +- yt-dlp -j  ------------>  metadata + HLS-länkar (bild/ljud/undertext)
-   |
-   +- GStreamer-pipeline
-         +- playbin "vplay"  ->  glupload -> glcolorconvert -> RGBA -> qml6glsink --+
-         |                                                                          |
-         +- playbin "aplay"  ->  autoaudiosink                                     |
-                                                                                    v
-                                                          QML: GstGLQt6VideoItem (bilden)
-                                                          QML: knappar, seekbar, undertext
+Search window "YtGst"
+  │  click a video
+  ▼
+Player process "YtGst Player"
+  ├── yt-dlp -j ──────────────► metadata + HLS URLs (video / audio / subtitles)
+  │
+  └── GStreamer
+        ├── playbin "vplay" → glupload → glcolorconvert → RGBA → qml6glsink ─┐
+        └── playbin "aplay" → autoaudiosink                                 │
+                                                                            ▼
+                                          QML: GstGLQt6VideoItem + controls
 ```
 
----
+YtGst prefers YouTube's **HLS** streams (`.m3u8`) because GStreamer can seek in
+them.
 
-## Rendering, GPU och prestanda
+## Rendering and performance
 
-YtGst är byggt för att **använda grafikkortet och undvika mjukvarurendering**.
-Det ger lägre CPU-belastning och jämnare uppspelning.
+- **Hardware decoding.** With a working VA-API driver, GStreamer selects a
+  hardware decoder such as `vah264dec` instead of a software decoder such as
+  `avdec_h264`. YtGst raises the rank of the chosen decoder so it is picked
+  first.
+- **GPU rendering.** Frames stay in GPU memory (`GLMemory`) and are drawn by
+  Qt's GPU scene. Color conversion happens on the GPU (`glcolorconvert`).
 
-- **Hårdvaruavkodning (decode):** När det finns en fungerande VA-API-driver
-  väljer GStreamer en hårdvarudekoder (t.ex. `vah264dec`) i stället för en
-  mjukvarudekoder (`avdec_h264`). YtGst höjer den valda dekoderns "rank", så
-  den väljs först. Se [Kompileringsflaggor](#kompileringsflaggor).
-- **GPU-uppladdning och rendering:** Bildrutorna läggs i **GPU-minne**
-  (`GLMemory`) och ritas av Qt:s grafikkortsbaserade scen. Bilden lämnar i
-  princip aldrig grafikkortet i onödan.
-- **Ingen CPU-färgkonvertering:** Färgkonverteringen sker på GPU:n
-  (`glcolorconvert`) i stället för på CPU:n.
+### OpenGL, OpenGL ES and Vulkan
 
-### OpenGL, OpenGL ES och Vulkan
+Rendering uses **OpenGL / OpenGL ES**, because GStreamer's `qml6glsink`
+requires an OpenGL context to hand frames to Qt. YtGst therefore pins Qt to
+OpenGL in `src/main.cpp`.
 
-Ritningen sker via **OpenGL / OpenGL ES**. Anledningen är att GStreamers
-`qml6glsink` kräver en **OpenGL-kontext** för att kunna lämna bildrutor till
-Qt. YtGst låser därför Qt till OpenGL i `src/main.cpp`.
+Qt 6 can itself use several graphics APIs (Vulkan, OpenGL ES, OpenGL) with
+automatic fallback, but that applies to Qt's own drawing. **GStreamer 1.24 has
+no Vulkan sink for Qt**, so video rendering cannot use Vulkan today; that would
+require a different GStreamer sink.
 
-Qt 6 kan i sig använda flera grafikkorts-API:er (så kallade RHI-backends),
-inklusive **Vulkan**, OpenGL ES och OpenGL, med automatisk fallback. Det gäller
-dock Qt:s egen ritning – **GStreamer 1.24 har ingen Vulkan-sink för Qt**, så
-just videorenderingen kan inte köras på Vulkan i dag. Därför är appen knuten
-till OpenGL/OpenGL ES. Skulle Vulkan bli aktuellt krävs en annan GStreamer-sink
-än `qml6glsink`.
+A working graphics driver is required. Without one, Qt can fall back to
+software OpenGL (`llvmpipe`) and the CPU does the work, which defeats the
+purpose of YtGst.
 
-> **Viktigt:** Ett fungerande grafikkortsdrivrutin krävs. Saknas den kan Qt
-> falla tillbaka på *software OpenGL* (t.ex. `llvmpipe`), vilket innebär att
-> CPU:n får göra jobbet. Det motsäger hela poängen med YtGst. Kontrollera att
-> hårdvaruavkodning och GL fungerar (se [Felsökning](#felsökning)).
+## Requirements
 
----
+Package names below are for Debian/Ubuntu-like systems.
 
-## Beroenden
+**Build tools**
 
-YtGst kräver följande. Paketnamnen nedan gäller Debian/Ubuntu-liknande system.
-
-### Byggverktyg
-
-| Verktyg | Varför |
+| Package | Purpose |
 | --- | --- |
-| `cmake` (>= 3.16) | Byggsystem |
-| `g++` (C++17) | Kompilator |
-| `pkg-config` | Hittar GStreamer |
+| `cmake` (>= 3.16) | Build system |
+| `g++` (C++17) | Compiler |
+| `pkg-config` | Locates GStreamer |
 
-### Qt 6 (>= 6.2)
+**Qt 6 (>= 6.2)**
 
-| Paket | Varför |
+| Package | Purpose |
 | --- | --- |
-| `qt6-base-dev` | Qt-grunder, nätverk |
+| `qt6-base-dev` | Qt core and network |
 | `qt6-declarative-dev` | Qt Quick / QML |
-| `qml6-module-qtquick` | QML-modulen `QtQuick` |
-| `qml6-module-qtquick-controls` | QML-modulen `QtQuick.Controls` |
+| `qml6-module-qtquick` | `QtQuick` QML module |
+| `qml6-module-qtquick-controls` | `QtQuick.Controls` QML module |
 
-### GStreamer 1.0
+**GStreamer 1.0**
 
-| Paket | Vad det ger |
+| Package | Provides |
 | --- | --- |
-| `libgstreamer1.0-dev` | Utvecklingshuvuden för GStreamer |
-| `libgstreamer-plugins-base1.0-dev` | Huvuden för bas-plugins |
-| `libgstreamer-gl1.0-dev` | Huvuden för GL-plugins (`gstreamer-gl-1.0`) |
-| `gstreamer1.0-plugins-base` | Grundplugins (t.ex. `playbin`) |
-| `gstreamer1.0-plugins-good` | Bl.a. `souphttpsrc` (HTTP) |
-| `gstreamer1.0-plugins-bad` | Bl.a. `hlsdemux` (HLS) och `vah264dec` (VA-API) |
-| `gstreamer1.0-libav` | Mjukvarudekodrar (`avdec_h264`) som reserv |
-| `gstreamer1.0-gl` | `glupload`, `glcolorconvert`, GL-sinks |
-| `gstreamer1.0-qt6` | `qml6glsink` – bryggan mellan GStreamer och Qt |
+| `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-gl1.0-dev` | Development headers |
+| `gstreamer1.0-plugins-base` | `playbin` and base plugins |
+| `gstreamer1.0-plugins-good` | `souphttpsrc` and more |
+| `gstreamer1.0-plugins-bad` | `hlsdemux`, `vah264dec` |
+| `gstreamer1.0-libav` | Software decoders (fallback) |
+| `gstreamer1.0-gl` | `glupload`, `glcolorconvert` |
+| `gstreamer1.0-qt6` | `qml6glsink` |
 
-### Grafikkort / videoavkodning (VA-API)
+**GPU / video decoding (VA-API)** – pick the one for your card:
 
-Välj det som matchar ditt kort:
-
-| Paket | För |
+| Package | For |
 | --- | --- |
-| `i965-va-driver` | Äldre Intel (Haswell/Broadwell m.fl.) |
-| `intel-media-va-driver` | Nyare Intel (`iHD`) |
+| `i965-va-driver` | Older Intel (Haswell/Broadwell) |
+| `intel-media-va-driver` | Newer Intel (`iHD`) |
 | `mesa-va-drivers` | AMD / Mesa |
-| NVIDIA | NVIDIA:s egen drivrutin (NVDEC) |
+| NVIDIA driver | NVIDIA (NVDEC) |
 
-### yt-dlp
+**yt-dlp** is required at runtime but is not bundled. See
+[yt-dlp](#yt-dlp) below.
 
-Se nästa avsnitt.
+## Build and run
 
----
+A complete example, from a fresh Debian/Ubuntu machine to a running app.
 
-## Installera yt-dlp
+**1. Install the build dependencies**
 
-yt-dlp är ett fristående program (Python) som YtGst startar som en
-underprocess. Det ingår **inte** i YtGst och måste installeras separat.
+```bash
+sudo apt update
+sudo apt install -y \
+  cmake g++ pkg-config \
+  qt6-base-dev qt6-declarative-dev \
+  qml6-module-qtquick qml6-module-qtquick-controls \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-gl1.0-dev \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-qt6 \
+  i965-va-driver intel-media-va-driver mesa-va-drivers
+```
 
-### Var ska yt-dlp ligga?
+**2. Get the source**
 
-YtGst letar efter yt-dlp i denna ordning:
+```bash
+git clone https://github.com/DanielMartensson/YtGst.git
+cd YtGst
+```
 
-1. **Sökvägen som anges vid bygget** via CMake-flaggan `YTGST_YTDLP_PATH`.
-   Den kompileras in i programmet och används om filen finns.
-2. **`PATH`** – om ingen sökväg angetts (eller om den inte finns) söker YtGst
-   i systemets `PATH`, precis som ett vanligt kommando.
+**3. Configure with CMake**
 
-Praktiskt innebär det att yt-dlp kan ligga nästan var som helst, så länge den
-hittas. Vanliga platser:
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
 
-- `/usr/bin/yt-dlp` eller `/usr/local/bin/yt-dlp` (systeminstallation),
-- `~/.local/bin/yt-dlp` (användarinstallation, t.ex. via pip/pipx),
-- en godtycklig sökväg som du pekar ut med `YTGST_YTDLP_PATH`.
+`-S .` is the source directory, `-B build` the build directory. CMake creates
+`build/`, keeps the source tree clean, and prints what it detected:
 
-### Installera
+```text
+-- yt-dlp: /home/your-user/.local/bin/yt-dlp
+-- Video decoder: vah264dec
+```
 
-Rekommenderat (senaste versionen som fristående binär, ingen Python-miljö):
+If yt-dlp is not found, or you want another decoder, add flags:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DYTGST_YTDLP_PATH=/home/your-user/.local/bin/yt-dlp \
+  -DYTGST_VIDEO_DECODER=vah264dec \
+  -DYTGST_VAAPI_DRIVER=i965
+```
+
+**4. Build**
+
+```bash
+cmake --build build -j"$(nproc)"
+```
+
+The executable is written to `build/ytgst`.
+
+**5. Run**
+
+```bash
+./build/ytgst
+```
+
+**Everyday rebuilding.** After the first configuration, only:
+
+```bash
+cmake --build build -j"$(nproc)"
+```
+
+**Clean rebuild.** Delete the build directory and configure again:
+
+```bash
+rm -rf build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+```
+
+**Debug build.** Use a separate build directory:
+
+```bash
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j"$(nproc)"
+./build-debug/ytgst
+```
+
+**Install system-wide**
+
+```bash
+sudo cmake --install build
+```
+
+## Compile-time options
+
+These are set when configuring with CMake, so YtGst can adapt to different
+machines without code changes.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `YTGST_YTDLP_PATH` | empty (auto-detected) | Path to yt-dlp. Empty = auto via `find_program`, then `PATH`. |
+| `YTGST_VIDEO_DECODER` | `vah264dec` | GStreamer video decoder to prioritize. |
+| `YTGST_VAAPI_DRIVER` | empty (auto `i965`) | Value for `LIBVA_DRIVER_NAME`, e.g. `i965` or `iHD`. |
+
+Common decoder values:
+
+| Value | Type |
+| --- | --- |
+| `vah264dec`, `vah265dec` | Intel/AMD VA-API (H.264 / H.265) |
+| `nvdec_h264`, `nvh264dec` | NVIDIA NVDEC |
+| `avdec_h264` | Software decoder (CPU), fallback only |
+
+Example:
+
+```bash
+cmake -S . -B build \
+  -DYTGST_VIDEO_DECODER=vah265dec \
+  -DYTGST_VAAPI_DRIVER=iHD
+cmake --build build -j"$(nproc)"
+```
+
+## yt-dlp
+
+yt-dlp is a standalone Python program that YtGst starts as a subprocess. It is
+not bundled and must be installed separately.
+
+**Where YtGst looks for it, in order:**
+
+1. The path compiled in via `YTGST_YTDLP_PATH` (used if the file exists).
+2. The system `PATH`, like any normal command.
+
+So yt-dlp can live almost anywhere as long as it can be found, for example
+`/usr/bin/yt-dlp`, `/usr/local/bin/yt-dlp` or `~/.local/bin/yt-dlp`.
+
+**Install (recommended, standalone binary):**
 
 ```bash
 mkdir -p ~/.local/bin
 curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
   -o ~/.local/bin/yt-dlp
 chmod +x ~/.local/bin/yt-dlp
-# se till att ~/.local/bin finns i PATH, annars:
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
-Alternativ via pakethanterare:
+**Install via package manager (may be older):**
 
 ```bash
-sudo apt install yt-dlp        # kan vara en äldre version
-# eller
+sudo apt install yt-dlp
+# or
 pipx install yt-dlp
 ```
 
-Uppdatera gärna yt-dlp då och då, eftersom YouTube ändrar sig ofta:
+**Update now and then**, since YouTube changes often:
 
 ```bash
-yt-dlp -U          # för den fristående binären
+yt-dlp -U          # standalone binary
 pipx upgrade yt-dlp
 ```
 
----
+## Downloads
 
-## Var hamnar nedladdade filer?
+Click the download button (or press `D`) to download the current video.
 
-När du klickar på **nedladdningsknappen** (eller trycker **D**) startar YtGst
-yt-dlp för att ladda ner videon till disk.
-
-- **Mapp:** systemets nedladdningsmapp, normalt **`~/Downloads`**.
-  Om den inte kan hittas används filmmappen, och i sista hand hemkatalogen.
-- **Filnamn:** `%(title)s [%(id)s].%(ext)s`, t.ex.
+- **Folder:** the system download folder, normally `~/Downloads`. If it cannot
+  be found, the movies folder is used, then the home directory.
+- **File name:** `%(title)s [%(id)s].%(ext)s`, e.g.
   `Never Gonna Give You Up [dQw4w9WgXcQ].mkv`.
-- **Format:** bästa tillgängliga bild + ljud, sammanslagna till en **MKV-fil**
-  (`--merge-output-format mkv`).
-- **Förlopp:** en procentsiffra visas i en liten ruta ovanför knappen.
-- **Avbryt:** klicka på knappen igen (eller tryck **D** igen) medan den laddar.
+- **Format:** best video + best audio, merged into a single **MKV** file.
+- **Progress** is shown in a small box above the button.
+- **Cancel:** click the button again (or press `D` again).
 
-YtGst kör yt-dlp med ungefär dessa argument:
+yt-dlp is run with approximately:
 
 ```text
 --newline --no-warnings --no-playlist
--P <nedladdningsmapp>
+-P <download folder>
 -o "%(title)s [%(id)s].%(ext)s"
 -f bestvideo+bestaudio/best
 --merge-output-format mkv
-<videons webbadress>
+<video URL>
 ```
 
----
-
-## Bygg och kör
-
-```bash
-git clone <repo-url> ytgst
-cd ytgst
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-./build/ytgst
-```
-
-Vill du installera systemet:
-
-```bash
-sudo cmake --install build
-```
-
----
-
-## Kompileringsflaggor
-
-Vissa saker bestäms redan när programmet byggs. Det gör att YtGst kan anpassas
-till olika datorer utan att koden ändras.
-
-| Flagga | Standard | Betydelse |
-| --- | --- | --- |
-| `YTGST_YTDLP_PATH` | tom (hittas automatiskt) | Sökväg till yt-dlp. Tom = auto via `find_program` och sedan `PATH`. |
-| `YTGST_VIDEO_DECODER` | `vah264dec` | Vilken GStreamer-videodekoder som ska prioriteras. |
-| `YTGST_VAAPI_DRIVER` | tom (auto `i965`) | Värde till `LIBVA_DRIVER_NAME`, t.ex. `i965` eller `iHD`. |
-
-Exempel – peka ut yt-dlp och välj en annan dekoder:
-
-```bash
-cmake -S . -B build \
-  -DYTGST_YTDLP_PATH=/home/din-anvandare/.local/bin/yt-dlp \
-  -DYTGST_VIDEO_DECODER=vah265dec \
-  -DYTGST_VAAPI_DRIVER=iHD
-cmake --build build -j
-```
-
-Vanliga dekoder-värden:
-
-| Värde | Typ |
-| --- | --- |
-| `vah264dec` / `vah265dec` | Intel/AMD VA-API (H.264 / H.265) |
-| `nvdec_h264` / `nvh264dec` | NVIDIA NVDEC |
-| `avdec_h264` | Mjukvarudekoder (CPU) – används bara som reserv |
-
-Bygget skriver ut vad som valdes:
-
-```text
--- yt-dlp: /home/din-anvandare/.local/bin/yt-dlp
--- Videodekoder: vah264dec
-```
-
----
-
-## Kodstruktur
+## Project structure
 
 ```text
 ytgst/
-├── CMakeLists.txt          Byggregler, beroenden och kompileringsflaggor
+├── CMakeLists.txt        Build rules, dependencies and compile-time options
 ├── qml/
-│   ├── Main.qml            Sökfönstret "YtGst"
-│   ├── PlayerWindow.qml    Spelfönstret "YtGst Player" med alla kontroller
-│   ├── SearchBar.qml       Sökfältet
-│   ├── VideoCard.qml       Ett videokort i listan
-│   └── Spinner.qml         Laddningsindikator
+│   ├── Main.qml          Search window "YtGst"
+│   ├── PlayerWindow.qml  Player window "YtGst Player" with all controls
+│   ├── SearchBar.qml     Search field
+│   ├── VideoCard.qml     One video card in the list
+│   └── Spinner.qml       Loading indicator
 └── src/
-    ├── main.cpp            Startpunkt, val av grafikkorts-API, start av spelarprocess
-    ├── player.cpp/.h       Spelaren: yt-dlp, GStreamer-pipeline, undertext, nedladdning
-    ├── youtube.cpp/.h      Sökning mot YouTube (Innertube)
-    ├── videomodel.cpp/.h   Listmodell med videokort
-    └── ytdlp.h             Hittar yt-dlp (kompilerad sökväg eller PATH)
+    ├── main.cpp          Entry point, graphics API, starts the player process
+    ├── player.cpp/.h     Player: yt-dlp, GStreamer pipeline, subtitles, download
+    ├── youtube.cpp/.h    YouTube search (Innertube)
+    ├── videomodel.cpp/.h List model with video cards
+    └── ytdlp.h           Locates yt-dlp (compiled path or PATH)
 ```
 
-### Kort om varje fil
-
-- **`src/main.cpp`** – Programstart. Initierar GStreamer, väljer VA-API-driver
-  och prioriterad videodekoder, låser Qt till OpenGL, och skapar antingen
-  sökfönstret eller (vid `--play`) ett spelarfönster. Klassen `Launcher`
-  startar spelaren som en egen process.
-- **`src/player.cpp` / `player.h`** – Hjärtat i uppspelningen. Hämtar metadata
-  med yt-dlp, bygger GStreamer-pipelinen, sköter play/paus, seek, hastighet,
-  upplösning, volym, undertexter och nedladdning. Allt exponeras till QML via
-  `Q_PROPERTY` och `Q_INVOKABLE`-metoder.
-- **`src/youtube.cpp` / `youtube.h`** – Skickar sökbegäranden och
-  " continuation"-begäranden (fler sidor) till YouTubes interna API och tolkar
-  JSON-svaret. Hämtar även gilla-markeringar i bakgrunden med yt-dlp.
-- **`src/videomodel.cpp` / `videomodel.h`** – En `QAbstractListModel` som håller
-  listan av videor (id, titel, kanal, visningar, längd, miniatyr, m.m.).
-- **`src/ytdlp.h`** – Liten hjälpare som returnerar sökvägen till yt-dlp.
-- **`qml/Main.qml`** – Sökfönstret: sökfält, lista och felmeddelanden.
-- **`qml/PlayerWindow.qml`** – Spelfönstret: videoyta, seekbar, play/paus,
-  hastighet, upplösning, undertexter, fullskärm, nedladdning och volym.
-  Kontrollerna tonas ut efter 5 sekunder.
-
----
-
-## Undertexter
-
-YtGst stödjer både **manuella** undertexter (som skapats av kanalen) och
-**automatiskt genererade/översatta** undertexter.
-
-1. När videon läses in listas alla tillgängliga spår i CC-menyn.
-2. När du väljer ett språk hämtas undertexten och sparas i en **cache per
-   språk**, så att växling fram och tillbaka går snabbt.
-3. Undertexten tolkas till tidsstämplade rader (cues) och visas i en ruta
-   längst ner. Formatet är i första hand YouTubes `json3`, annars VTT.
-
-### Cookies från webbläsaren
-
-YouTube kräver numera att förfrågan är autentiserad för att lämna ut
-automatiskt översatta undertexter (annars svarar servern `HTTP 429`). YtGst
-löser det genom att låta yt-dlp hämta **cookies från din webbläsare** i
-samband med att videon läses in.
-
-- YtGst letar efter en installerad webbläsare (Firefox, Chromium, Chrome,
-  Brave, Edge, Vivaldi, Opera) och använder dess cookies.
-- Cookies skrivs till en **tillfällig fil** som läses in och **raderas direkt**
-  efteråt. Själva cookien skickas bara till `youtube.com`.
-- Är du inloggad på YouTube i webbläsaren fungerar undertexterna som bäst.
-  Saknas webbläsare fungerar fortfarande manuella undertexter.
-
----
-
-## Tangentbord och mus
-
-| Tangent / handling | Funktion |
+| File | Responsibility |
 | --- | --- |
-| Klick på video (sökfönstret) | Öppnar videon i ett nytt spelarfönster |
-| Klick på videoytan | Play/paus (via play-knappen) |
-| `M` | Mute av/på |
-| `Upp` / `Ner` | Höj / sänk volymen |
-| `D` | Starta / avbryt nedladdning |
-| `F` eller `F11` | Fullskärm av/på |
-| `Esc` | Lämna fullskärm, annars stäng fönstret |
-| Dra i seekbaren | Spola till valfri tid |
+| `src/main.cpp` | Initializes GStreamer, selects VA-API driver and decoder, pins Qt to OpenGL, opens the search or player window. `Launcher` starts the player process. |
+| `src/player.*` | Fetches metadata with yt-dlp, builds the pipeline, and handles play/pause, seek, speed, resolution, volume, subtitles and downloads. Exposed to QML via `Q_PROPERTY` / `Q_INVOKABLE`. |
+| `src/youtube.*` | Sends search and continuation requests to YouTube's internal API, parses the JSON, and fetches like counts in the background with yt-dlp. |
+| `src/videomodel.*` | A `QAbstractListModel` holding the video list. |
+| `src/ytdlp.h` | Small helper returning the yt-dlp path. |
+| `qml/Main.qml` | Search field, list and error messages. |
+| `qml/PlayerWindow.qml` | Video surface, seek bar, play/pause, speed, resolution, subtitles, fullscreen, download and volume. Controls fade out after 5 s. |
 
----
+## Subtitles
 
-## Felsökning
+YtGst supports both **manual** subtitles (made by the channel) and
+**automatically generated or translated** subtitles.
+
+1. When a video is loaded, all tracks are listed in the CC menu.
+2. Picking a language fetches the subtitle into a **per-language cache**, so
+   switching back and forth is fast.
+3. Subtitles are parsed into time-stamped cues and shown in a box at the
+   bottom. The format is YouTube's `json3` first, otherwise VTT.
+
+**Cookies from the browser.** YouTube requires an authenticated request for
+automatically translated subtitles (otherwise `HTTP 429`). YtGst lets yt-dlp
+fetch **cookies from an installed browser** (Firefox, Chromium, Chrome, Brave,
+Edge, Vivaldi or Opera) when a video is loaded. The cookies are written to a
+temporary file that is read and deleted immediately; only `youtube.com`
+receives them. Sign in to YouTube in your browser for best results. Without a
+browser, manual subtitles still work.
+
+## Keyboard shortcuts
+
+| Key / action | Function |
+| --- | --- |
+| Click a video (search window) | Open it in a new player window |
+| `M` | Mute on/off |
+| `Up` / `Down` | Volume up / down |
+| `D` | Start / cancel download |
+| `F` or `F11` | Fullscreen on/off |
+| `Esc` | Leave fullscreen, otherwise close the window |
+
+## Troubleshooting
 
 **"qml6glsink saknas – installation av gstreamer1.0-qt6 krävs"**
 
@@ -418,53 +370,44 @@ samband med att videon läses in.
 sudo apt install gstreamer1.0-qt6
 ```
 
-**"yt-dlp hittades inte"**
+**"yt-dlp hittades inte"** – install yt-dlp and make sure it is in `PATH`, or
+build with `-DYTGST_YTDLP_PATH=/path/to/yt-dlp`.
 
-Installera yt-dlp och se till att den finns i `PATH`, eller bygg med
-`-DYTGST_YTDLP_PATH=/sökväg/till/yt-dlp`.
-
-**Svart bild / ingen video**
-
-Kontrollera att grafikkortet och OpenGL fungerar:
+**Black screen / no video** – check that the GPU and OpenGL work:
 
 ```bash
-glxinfo | grep "OpenGL renderer"     # ska visa ditt grafikkort, inte llvmpipe
-vainfo                                # ska visa VA-API-profiler
+glxinfo | grep "OpenGL renderer"     # should show your GPU, not llvmpipe
+vainfo                               # should show VA-API profiles
 ```
 
-**Hackig uppspelning / hög CPU**
+**Stuttering or high CPU**
 
-- Kontrollera att hårdvaruavkodning används: spela upp med `GST_DEBUG=3` och
-  leta efter `vah264dec`, eller testa `gst-inspect-1.0 vah264dec`.
-- Testa en annan dekoder/VA-driver via kompileringsflaggorna.
-- Se till att du inte kör på software OpenGL (`llvmpipe`).
+- Check that hardware decoding is used: run with `GST_DEBUG=3` and look for
+  `vah264dec`, or test `gst-inspect-1.0 vah264dec`.
+- Try another decoder or VA driver via the compile-time options.
+- Make sure you are not on software OpenGL (`llvmpipe`).
 
-**Undertexter fungerar inte (t.ex. bara tyska/spanska)**
+**Subtitles only work for some languages** – sign in to YouTube in your
+browser; automatically translated subtitles require cookies.
 
-Logga in på YouTube i din webbläsare och se till att webbläsaren finns
-installerad. Automatiskt översatta undertexter kräver cookies.
-
-**Felsök med GStreamer**
+**Debug with GStreamer**
 
 ```bash
-GST_DEBUG=3 ./build/ytgst            # mycket information
+GST_DEBUG=3 ./build/ytgst            # very verbose
 GST_DEBUG=*:4 ./build/ytgst 2> gst.log
 ```
 
----
+## Known limitations
 
-## Kända begränsningar
+- **GPU rendering only.** Without a working graphics driver, Qt may fall back
+  to software OpenGL and CPU usage becomes high.
+- **No Vulkan for video.** GStreamer 1.24 has no Vulkan sink for Qt, so video
+  is drawn with OpenGL / OpenGL ES.
+- **HLS is preferred.** YtGst selects HLS streams because they can be seeked.
+  Some high resolutions may not exist in HLS, so the best available
+  alternative is used.
+- **Subtitles may require signing in** (cookies) to YouTube.
+- **Network is always required.** Neither search nor playback works offline.
+- **yt-dlp must be reasonably up to date**, since YouTube changes often.
 
-- **Enbart GPU-rendering.** Saknas fungerande grafikkortsdrivrutin kan Qt
-  falla tillbaka på software OpenGL och då blir CPU-belastningen hög.
-- **Ingen Vulkan för videon.** GStreamer 1.24 har ingen Vulkan-sink för Qt;
-  videon ritas därför med OpenGL/OpenGL ES (se
-  [Rendering, GPU och prestanda](#rendering-gpu-och-prestanda)).
-- **HLS föredras.** YtGst väljer YouTubes HLS-strömmar eftersom de går att
-  spola i. Vissa höga upplösningar kan saknas i HLS och då används bästa
-  tillgängliga alternativ.
-- **Undertexter kräver ibland inloggning** (cookies) på YouTube.
-- **Nätverk krävs alltid.** Varken sökning eller uppspelning fungerar offline.
-- **yt-dlp måste vara någorlunda uppdaterad.** YouTube ändrar sitt upplägg
-  med jämna mellanrum.
 

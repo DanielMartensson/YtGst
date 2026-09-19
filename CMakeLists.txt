@@ -25,7 +25,7 @@ message(STATUS "yt-dlp: ${YTGST_YTDLP_PATH}")
 # Föredragen GStreamer-videodekoder. Prioriteras framför övriga dekodrar.
 # Exempel: vah264dec (Intel VA-API), vah265dec, nvdec_h264, avdec_h264.
 set(YTGST_VIDEO_DECODER "vah264dec" CACHE STRING "GStreamer-videodekoder som prioriteras")
-message(STATUS "Videodekoder: ${YTGST_VIDEO_DECODER}")
+message(STATUS "Video decoder: ${YTGST_VIDEO_DECODER}")
 
 # VA-API-drivrutin som sätts i LIBVA_DRIVER_NAME. Tom = automatisk.
 # Exempel: i965 (Haswell/Broadwell), iHD (nyare Intel), radeonsi, nvidia.
