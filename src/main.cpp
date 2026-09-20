@@ -26,7 +26,6 @@
 // qml6glsink video sink requires to draw GStreamer frames in the scene graph.
 static void pickGraphicsApi()
 {
-    qInfo().noquote() << "YtGst: using OpenGL RHI renderer";
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
 }
 
