@@ -20,6 +20,12 @@ The goal is GPU-accelerated playback: hardware video decoding (VA-API) and
 GPU rendering through OpenGL, so the CPU does as little work as possible.
 Software rendering is never the intention.
 
+## Demos
+
+| Searching | Playing |
+| --- | --- |
+| ![Search window](docs/search.gif) | ![Player window](docs/player.gif) |
+
 ## How it works
 
 1. **Search.** `src/youtube.cpp` queries YouTube's internal "Innertube" API
@@ -64,16 +70,15 @@ them.
 - **GPU rendering.** Frames stay in GPU memory (`GLMemory`) and are drawn by
   Qt's GPU scene. Color conversion happens on the GPU (`glcolorconvert`).
 
-### OpenGL, OpenGL ES and Vulkan
+### Graphics API: OpenGL only
 
-Rendering uses **OpenGL / OpenGL ES**, because GStreamer's `qml6glsink`
-requires an OpenGL context to hand frames to Qt. YtGst therefore pins Qt to
-OpenGL in `src/main.cpp`.
+YtGst uses **OpenGL only** – Vulkan is not used anywhere. Qt is pinned to an
+OpenGL context in `src/main.cpp`, because GStreamer's `qml6glsink` requires an
+OpenGL context to hand each video frame to Qt. Qt renders the QML interface and
+the video through that single OpenGL context.
 
-Qt 6 can itself use several graphics APIs (Vulkan, OpenGL ES, OpenGL) with
-automatic fallback, but that applies to Qt's own drawing. **GStreamer 1.24 has
-no Vulkan sink for Qt**, so video rendering cannot use Vulkan today; that would
-require a different GStreamer sink.
+Hardware decoding is separate from the graphics API: VA-API decodes frames on
+the GPU, and the decoded frames are uploaded to GL textures for drawing.
 
 A working graphics driver is required. Without one, Qt can fall back to
 software OpenGL (`llvmpipe`) and the CPU does the work, which defeats the
@@ -401,8 +406,8 @@ GST_DEBUG=*:4 ./build/ytgst 2> gst.log
 
 - **GPU rendering only.** Without a working graphics driver, Qt may fall back
   to software OpenGL and CPU usage becomes high.
-- **No Vulkan for video.** GStreamer 1.24 has no Vulkan sink for Qt, so video
-  is drawn with OpenGL / OpenGL ES.
+- **OpenGL only.** Rendering is OpenGL. GStreamer 1.24 has no Vulkan sink for
+  Qt, so Vulkan is not used.
 - **HLS is preferred.** YtGst selects HLS streams because they can be seeked.
   Some high resolutions may not exist in HLS, so the best available
   alternative is used.
