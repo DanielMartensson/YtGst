@@ -112,14 +112,14 @@ Item {
 
                 Text {
                     Layout.fillWidth: true
-                    text: model.viewsText
+                    text: model.viewsText ?? ""
                     color: "#8a8a92"
                     font.pixelSize: 12
                 }
 
                 Text {
                     visible: showLikes
-                    text: model.likesText
+                    text: model.likesText ?? ""
                     color: "#8a8a92"
                     font.pixelSize: 12
                 }
