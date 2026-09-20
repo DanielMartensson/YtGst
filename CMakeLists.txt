@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Quick Network)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Quick Network Widgets)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-gl-1.0)
@@ -59,7 +59,7 @@ target_sources(ytgst PRIVATE
     src/ytdlp.h
 )
 
-target_link_libraries(ytgst PRIVATE Qt6::Quick Qt6::Network PkgConfig::GST)
+target_link_libraries(ytgst PRIVATE Qt6::Quick Qt6::Network Qt6::Widgets PkgConfig::GST)
 
 # Skicka in de konfigurerbara värdena som kompileringsflaggor (-D...).
 target_compile_definitions(ytgst PRIVATE

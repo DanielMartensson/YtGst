@@ -1,12 +1,24 @@
+#include <QApplication>
 #include <QFile>
-#include <QGuiApplication>
+#include <QMessageBox>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QProcess>
 #include <QQuickWindow>
+#include <QSurfaceFormat>
+#include <QTimer>
 #include <QSGRendererInterface>
 
+#include <cstring>
+
 #include <gst/gst.h>
+
+#ifndef GL_RENDERER
+#define GL_RENDERER 0x1F01
+#endif
 
 // Startar spelaren som en egen process med ett eget QQuickWindow/GL-kontext.
 // Huvudfönstret ("YtGst") förblir öppet medan "YtGst Player" spelar.
@@ -25,6 +37,76 @@ public:
                                  QStringLiteral("--title"), title});
     }
 };
+
+// Hämtar GL-renderaren (t.ex. "llvmpipe" vid mjukvarurendering) via en
+// separat, dold GL-kontext så att vi slipper röra scenografens kontext.
+static QString currentRenderer()
+{
+    QOffscreenSurface surface;
+    surface.setFormat(QSurfaceFormat::defaultFormat());
+    surface.create();
+    if (!surface.isValid())
+        return QString();
+
+    QOpenGLContext ctx;
+    ctx.setFormat(surface.format());
+    if (!ctx.create())
+        return QString();
+    if (!ctx.makeCurrent(&surface))
+        return QString();
+
+    QString renderer;
+    const GLubyte *s = ctx.functions()->glGetString(GL_RENDERER);
+    if (s)
+        renderer = QString::fromUtf8(reinterpret_cast<const char *>(s));
+    ctx.doneCurrent();
+    return renderer;
+}
+
+// Sammanställer startproblem som gör att GPU-acceleration inte fungerar:
+// saknad hårdvaruavkodare, saknad qml6glsink eller mjukvarurendering.
+static QStringList startupProblems()
+{
+    QStringList problems;
+    GstRegistry *registry = gst_registry_get();
+
+#if defined(YTGST_VIDEO_DECODER)
+    const char *decoderName = YTGST_VIDEO_DECODER;
+#else
+    const char *decoderName = "vah264dec";
+#endif
+    if (std::strlen(decoderName) > 0) {
+        GstPluginFeature *feature = gst_registry_lookup_feature(registry, decoderName);
+        if (feature) {
+            gst_object_unref(feature);
+        } else {
+            problems << QStringLiteral(
+                "Hårdvaruavkodaren \"%1\" hittades inte – installera "
+                "gstreamer1.0-vaapi och en fungerande VA-API-drivrutin (t.ex. "
+                "i965-va-driver eller intel-media-va-driver).")
+                             .arg(QString::fromLatin1(decoderName));
+        }
+    }
+
+    GstPluginFeature *sink = gst_registry_lookup_feature(registry, "qml6glsink");
+    if (sink) {
+        gst_object_unref(sink);
+    } else {
+        problems << QStringLiteral(
+            "qml6glsink saknas – installera gstreamer1.0-qt6.");
+    }
+
+    const QString renderer = currentRenderer();
+    const QString low = renderer.toLower();
+    if (low.contains("llvmpipe") || low.contains("softpipe") || low.contains("swiftshader")) {
+        problems << QStringLiteral(
+            "Mjukvarurendering upptäckt (%1). YtGst vägrar köra utan "
+            "fungerande GPU-drivrutin.")
+                         .arg(renderer);
+    }
+
+    return problems;
+}
 
 int main(int argc, char *argv[])
 {
@@ -55,7 +137,7 @@ int main(int argc, char *argv[])
                 gst_plugin_feature_set_rank(feature, GST_RANK_PRIMARY + 1);
                 gst_object_unref(feature);
             } else {
-                qWarning("Videodekodern \"%s\" hittades inte – använder standard",
+                qWarning("Videodekodern \"%s\" hittades inte – varning visas vid start",
                          decoder.constData());
             }
         }
@@ -73,7 +155,9 @@ int main(int argc, char *argv[])
 
     QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
 
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
+
+    const QStringList problems = startupProblems();
 
     QString playId;
     QString playTitle;
@@ -105,6 +189,21 @@ int main(int argc, char *argv[])
             root->setProperty("videoId", playId);
             root->setProperty("videoTitle", playTitle);
         }
+    }
+
+    // Visa en varningsruta vid start om GPU-acceleration inte fungerar.
+    if (!problems.isEmpty()) {
+        QTimer::singleShot(600, &app, [problems]() {
+            QMessageBox box(
+                QMessageBox::Warning,
+                QStringLiteral("YtGst – varning"),
+                QStringLiteral("YtGst har upptäckt problem som hindrar "
+                               "GPU-accelererad uppspelning:"),
+                QMessageBox::Ok);
+            box.setInformativeText(problems.join(QLatin1Char('\n')));
+            box.setWindowModality(Qt::ApplicationModal);
+            box.show();
+        });
     }
 
     const int result = app.exec();

@@ -113,7 +113,6 @@ Package names below are for Debian/Ubuntu-like systems.
 | `gstreamer1.0-plugins-base` | `playbin` and base plugins |
 | `gstreamer1.0-plugins-good` | `souphttpsrc` and more |
 | `gstreamer1.0-plugins-bad` | `hlsdemux`, `vah264dec` |
-| `gstreamer1.0-libav` | Software decoders (fallback) |
 | `gstreamer1.0-gl` | `glupload`, `glcolorconvert` |
 | `gstreamer1.0-qt6` | `qml6glsink` |
 
@@ -143,7 +142,7 @@ sudo apt install -y \
   qml6-module-qtquick qml6-module-qtquick-controls \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-gl1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-qt6 \
+  gstreamer1.0-gl gstreamer1.0-qt6 \
   i965-va-driver intel-media-va-driver mesa-va-drivers
 ```
 
