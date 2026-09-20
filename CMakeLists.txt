@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Quick Network Widgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Quick Network Widgets)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-gl-1.0)
@@ -31,7 +31,7 @@ message(STATUS "Video decoder: ${YTGST_VIDEO_DECODER}")
 # Examples: i965 (Haswell/Broadwell), iHD (newer Intel), radeonsi, nvidia.
 set(YTGST_VAAPI_DRIVER "" CACHE STRING "LIBVA_DRIVER_NAME (e.g. i965 or iHD)")
 
-qt_standard_project_setup(REQUIRES 6.2)
+qt_standard_project_setup(REQUIRES 6.8)
 
 qt_add_executable(ytgst
     src/main.cpp

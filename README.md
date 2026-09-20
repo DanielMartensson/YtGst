@@ -72,10 +72,12 @@ them.
 
 ### Graphics API: OpenGL only
 
-YtGst uses **OpenGL only** – Vulkan is not used anywhere. Qt is pinned to an
-OpenGL context in `src/main.cpp`, because GStreamer's `qml6glsink` requires an
-OpenGL context to hand each video frame to Qt. Qt renders the QML interface and
-the video through that single OpenGL context.
+YtGst uses **OpenGL only**. Qt's RHI backend is pinned to the OpenGL backend
+(`OpenGLRhi`, `QQuickWindow::setGraphicsApi`) in `src/main.cpp`, instead of
+letting Qt auto-pick a backend. GStreamer's `qml6glsink` requires an OpenGL
+context to hand each video frame to Qt, so Qt renders the QML interface and the
+video through that single OpenGL context. This also matches OpenGL ES as used on
+embedded targets such as the STM32MP257F.
 
 Hardware decoding is separate from the graphics API: VA-API decodes frames on
 the GPU, and the decoded frames are uploaded to GL textures for drawing.
@@ -96,7 +98,12 @@ Package names below are for Debian/Ubuntu-like systems.
 | `g++` (C++17) | Compiler |
 | `pkg-config` | Locates GStreamer |
 
-**Qt 6 (>= 6.2)**
+**Qt 6 (>= 6.8.3)**
+
+YtGst requires Qt 6.8.3 or newer, matching the Qt shipped with the
+STM32MP257F BSP. When Qt is not installed in a system location, point CMake at
+it with `-DCMAKE_PREFIX_PATH=/path/to/Qt/6.8.3/gcc_64`. The development machine
+used for this project keeps Qt 6.8.3 in `/home/mint/Qt`.
 
 | Package | Purpose |
 | --- | --- |
@@ -156,7 +163,8 @@ cd YtGst
 **3. Configure with CMake**
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/home/mint/Qt/6.8.3/gcc_64
 ```
 
 `-S .` is the source directory, `-B build` the build directory. CMake creates
@@ -166,6 +174,10 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 -- yt-dlp: /home/your-user/.local/bin/yt-dlp
 -- Video decoder: vah264dec
 ```
+
+`-DCMAKE_PREFIX_PATH` points at the Qt installation when it is not in a system
+location (for example the Qt 6.8.3 installed under `/home/mint/Qt`). It can be
+omitted when Qt 6.8.3 is installed system-wide.
 
 If yt-dlp is not found, or you want another decoder, add flags:
 
@@ -200,14 +212,16 @@ cmake --build build -j"$(nproc)"
 
 ```bash
 rm -rf build
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/home/mint/Qt/6.8.3/gcc_64
 cmake --build build -j"$(nproc)"
 ```
 
 **Debug build.** Use a separate build directory:
 
 ```bash
-cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_PREFIX_PATH=/home/mint/Qt/6.8.3/gcc_64
 cmake --build build-debug -j"$(nproc)"
 ./build-debug/ytgst
 ```
@@ -405,8 +419,8 @@ GST_DEBUG=*:4 ./build/ytgst 2> gst.log
 
 - **GPU rendering only.** Without a working graphics driver, Qt may fall back
   to software OpenGL and CPU usage becomes high.
-- **OpenGL only.** Rendering is OpenGL. GStreamer 1.24 has no Vulkan sink for
-  Qt, so Vulkan is not used.
+- **OpenGL only.** The RHI backend is pinned to OpenGL (`OpenGLRhi`) in
+  `src/main.cpp`, so rendering is OpenGL/OpenGL ES.
 - **HLS is preferred.** YtGst selects HLS streams because they can be seeked.
   Some high resolutions may not exist in HLS, so the best available
   alternative is used.

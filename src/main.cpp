@@ -20,6 +20,16 @@
 #define GL_RENDERER 0x1F01
 #endif
 
+// Picks the scene graph's RHI graphics API before the application is
+// constructed. OpenGLRhi is the only backend YtGst uses – it is adapted for
+// OpenGL and OpenGL ES (as used on the STM32MP257F), which is what the
+// qml6glsink video sink requires to draw GStreamer frames in the scene graph.
+static void pickGraphicsApi()
+{
+    qInfo().noquote() << "YtGst: using OpenGL RHI renderer";
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+}
+
 // Starts the player as a separate process with its own QQuickWindow/GL context.
 // The main window ("YtGst") stays open while "YtGst Player" plays.
 class Launcher : public QObject
@@ -111,6 +121,13 @@ static QStringList startupProblems()
 
 int main(int argc, char *argv[])
 {
+    // qml6glsink must share an OpenGL context with the Qt scene graph, so the
+    // scene graph can draw the GStreamer GLMemory textures in the PlayerWindow.
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+
+    // The RHI backend must be picked before the application is constructed.
+    pickGraphicsApi();
+
     // VA-API driver: use the YTGST_VAAPI_DRIVER CMake flag if set, otherwise
     // i965 is auto-selected if present (Haswell), so vah264dec works.
 #ifdef YTGST_VAAPI_DRIVER
@@ -153,8 +170,6 @@ int main(int argc, char *argv[])
     } else {
         gst_object_unref(sink);
     }
-
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
 
     QApplication app(argc, argv);
 
