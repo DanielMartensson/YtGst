@@ -195,9 +195,9 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("launcher"), &launcher);
 
     if (playId.isEmpty()) {
-        engine.load(QUrl(QStringLiteral("qrc:/Ytgst/qml/Main.qml")));
+        engine.loadFromModule(QStringLiteral("Ytgst"), QStringLiteral("Main"));
     } else {
-        engine.load(QUrl(QStringLiteral("qrc:/Ytgst/qml/PlayerWindow.qml")));
+        engine.loadFromModule(QStringLiteral("Ytgst"), QStringLiteral("PlayerWindow"));
         if (!engine.rootObjects().isEmpty()) {
             QObject *root = engine.rootObjects().first();
             root->setProperty("standalone", true);

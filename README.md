@@ -202,6 +202,29 @@ The executable is written to `build/ytgst`.
 ./build/ytgst
 ```
 
+**Helper scripts.** Two convenience scripts wrap the steps above for this
+machine (Qt 6.8.3 in `/home/mint/Qt`):
+
+```bash
+./setup.sh   # configure and build into build/
+./run.sh     # run with the correct Qt library path
+```
+
+`setup.sh` configures CMake and builds, and honours `QT_PREFIX` for a custom Qt
+root (for example `QT_PREFIX=/opt/Qt ./setup.sh`). `run.sh` launches
+`build/ytgst` and sets `LD_LIBRARY_PATH` to the Qt libraries the binary is built
+against. This is needed on development machines where GStreamer's `qml6glsink`
+plugin is packaged against a different (system) Qt, so it would otherwise bind
+to the wrong `libQt6WaylandClient`. Arguments are passed through, for example:
+
+```bash
+./run.sh --play dQw4w9WgXcQ --title "My video"
+```
+
+On the STM32MP257F the build script is not needed and `./build/ytgst` runs
+directly, because the BSP's GStreamer `qt6` plugin is built against the BSP's
+own Qt.
+
 **Everyday rebuilding.** After the first configuration, only:
 
 ```bash
