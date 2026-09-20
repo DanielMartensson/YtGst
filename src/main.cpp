@@ -194,15 +194,16 @@ int main(int argc, char *argv[])
     // Visa en varningsruta vid start om GPU-acceleration inte fungerar.
     if (!problems.isEmpty()) {
         QTimer::singleShot(600, &app, [problems]() {
-            QMessageBox box(
+            QMessageBox *box = new QMessageBox(
                 QMessageBox::Warning,
                 QStringLiteral("YtGst – varning"),
                 QStringLiteral("YtGst har upptäckt problem som hindrar "
                                "GPU-accelererad uppspelning:"),
                 QMessageBox::Ok);
-            box.setInformativeText(problems.join(QLatin1Char('\n')));
-            box.setWindowModality(Qt::ApplicationModal);
-            box.show();
+            box->setInformativeText(problems.join(QLatin1Char('\n')));
+            box->setWindowModality(Qt::ApplicationModal);
+            box->setAttribute(Qt::WA_DeleteOnClose);
+            box->show();
         });
     }
 
