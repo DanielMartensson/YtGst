@@ -4,9 +4,9 @@
 #include <QStandardPaths>
 #include <QString>
 
-// Sökvägen till yt-dlp. Sätts vid kompilering via CMake-flaggan
-// YTGST_YTDLP_PATH. Är den tom eller pekar på en fil som inte finns
-// faller vi tillbaka på att söka i PATH.
+// Path to yt-dlp. Set at compile time through the CMake flag
+// YTGST_YTDLP_PATH. If it is empty or points to a missing file
+// we fall back to searching the PATH.
 inline QString ytDlpExecutable()
 {
 #ifdef YTGST_YTDLP_PATH

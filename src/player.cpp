@@ -25,7 +25,7 @@
 
 #include <gst/gst.h>
 
-// Kort kod -> visningsnamn för de vanligaste undertextspråken.
+// Short code -> display name for the most common subtitle languages.
 static QString languageName(const QString &code)
 {
     static const QHash<QString, QString> names{
@@ -71,7 +71,7 @@ static QString stripVttTags(QString text)
 
 static bool parseVttTimestamp(const QString &value, qint64 *ms)
 {
-    // Stödjer "HH:MM:SS.mmm" och "MM:SS.mmm".
+    // Supports "HH:MM:SS.mmm" and "MM:SS.mmm".
     const QStringList parts = value.trimmed().split(QLatin1Char(':'));
     if (parts.size() < 2 || parts.size() > 3)
         return false;
@@ -89,9 +89,9 @@ static bool parseVttTimestamp(const QString &value, qint64 *ms)
     return true;
 }
 
-// Bygger yt-dlp-formatsträngen. height <= 0 betyder bästa tillgängliga
-// (sökbara) HLS-ström. HLS väljs i första hand eftersom GStreamer inte kan
-// seeka i YouTubes DASH/mp4-strömmar.
+// Builds the yt-dlp format string. height <= 0 means the best available
+// (seekable) HLS stream. HLS is chosen first because GStreamer cannot seek
+// in YouTube's DASH/mp4 streams.
 static QString formatForHeight(int height)
 {
     if (height > 0) {
@@ -102,7 +102,7 @@ static QString formatForHeight(int height)
     return QStringLiteral("bestvideo[protocol^=m3u8]+bestaudio[protocol^=m3u8]/bestvideo+bestaudio/best");
 }
 
-// Väljer en installerad webbläsare att hämta YouTube-cookies ifrån.
+// Picks an installed browser to fetch YouTube cookies from.
 static QString browserForCookies()
 {
     const QString home = QDir::homePath();
@@ -122,14 +122,14 @@ static QString browserForCookies()
     return QString();
 }
 
-// Tillfällig cookie-jar som yt-dlp skriver; läses in och raderas direkt efteråt.
+// Temporary cookie jar that yt-dlp writes to; read immediately afterwards and removed.
 static QString cookieFilePath()
 {
     return QDir::tempPath() + QStringLiteral("/ytgst-cookies.txt");
 }
 
-// Sätter User-Agent på playbins interna källa (playbin har ingen skrivbar
-// "source"-property, så detta görs via "source-setup"-signalen).
+// Sets the User-Agent on playbin's internal source (playbin has no writable
+// "source" property, so this is done through the "source-setup" signal).
 static void onSourceSetup(GstElement *, GstElement *source, gpointer)
 {
     if (g_object_class_find_property(G_OBJECT_GET_CLASS(source), "user-agent"))
@@ -179,7 +179,7 @@ Player::Player(QObject *parent)
             const QByteArray err = m_urlFetch.readAllStandardError().trimmed();
             const QString detail = QString::fromUtf8(err).left(300);
             emit errorOccurred(detail.isEmpty()
-                                   ? QStringLiteral("yt-dlp kunde inte hämta strömmen")
+                                   ? QStringLiteral("yt-dlp could not fetch the stream")
                                    : QStringLiteral("yt-dlp: %1").arg(detail));
             return;
         }
@@ -361,7 +361,7 @@ void Player::requestUrls()
     if (executable.isEmpty()) {
         m_loading = false;
         emit loadingChanged();
-        emit errorOccurred(QStringLiteral("yt-dlp hittades inte"));
+        emit errorOccurred(QStringLiteral("yt-dlp not found"));
         return;
     }
 
@@ -372,7 +372,7 @@ void Player::requestUrls()
         QStringLiteral("-f"), formatForHeight(m_requestedHeight),
         QStringLiteral("-j"), QStringLiteral("--no-warnings"),
     };
-    // Cookies krävs för automatiska/översatta undertexter (annars HTTP 429).
+    // Cookies are required for automatic/translated subtitles (otherwise HTTP 429).
     const QString browser = browserForCookies();
     if (!browser.isEmpty()) {
         arguments << QStringLiteral("--cookies-from-browser") << browser
@@ -418,7 +418,7 @@ void Player::setResolution(int height)
         return;
 
     m_requestedHeight = height;
-    // Behåll positionen över ombygget av pipelinen.
+    // Keep the position across the pipeline rebuild.
     m_pendingSeek = m_position > 0 ? m_position : 0;
     disposePipeline();
     requestUrls();
@@ -446,7 +446,7 @@ void Player::setSubtitleLanguage(const QString &language)
     if (language.isEmpty() || m_watchUrl.isEmpty())
         return;
 
-    // Redan hämtad? Använd cachen (undviker onödiga anrop och 429-throttling).
+    // Already fetched? Use the cache (avoids unnecessary calls and 429 throttling).
     const auto cached = m_cueCache.constFind(language);
     if (cached != m_cueCache.constEnd()) {
         m_cues = cached.value();
@@ -517,7 +517,7 @@ void Player::fetchSubtitle()
             }
         }
 
-        // Tillfällig 429/throttling – försök igen med stigande väntetid.
+        // Temporary 429/throttling – retry with increasing delay.
         if (m_subtitleRetries < 3) {
             ++m_subtitleRetries;
             const int delay = 1200 * m_subtitleRetries;
@@ -528,7 +528,7 @@ void Player::fetchSubtitle()
             return;
         }
 
-        setSubtitleText(tr("Undertexten kunde inte hämtas"));
+        setSubtitleText(tr("Subtitle could not be fetched"));
     });
 }
 
@@ -570,7 +570,7 @@ void Player::parseJsonSubtitles(const QByteArray &data, bool autoCaptions)
         return;
     }
 
-    // Automatiska texter: en händelse som bara innehåller "\n" avslutar raden.
+    // Automatic captions: an event containing only "\n" ends the line.
     QString pending;
     qint64 pendingStart = -1;
     const auto flush = [&](qint64 end) {
@@ -650,7 +650,7 @@ void Player::parseVttSubtitles(const QString &data)
             continue;
         cue.text = cueLines.join(QLatin1Char('\n'));
 
-        // Hoppa över block som ligger helt före föregående cue (autocaption-rollning).
+        // Skip blocks that end entirely before the previous cue (autocaption rolling).
         if (!m_cues.isEmpty() && cue.end <= m_cues.last().start)
             continue;
         m_cues.append(cue);
@@ -716,7 +716,7 @@ void Player::setRate(double rate)
     if (!m_pipeline)
         return;
 
-    // Ändra hastighet genom en seek till samma position med ny rate.
+    // Change speed by seeking to the same position with a new rate.
     gint64 position = 0;
     if (!gst_element_query_position(m_pipeline, GST_FORMAT_TIME, &position) || position < 0)
         position = 0;
@@ -742,8 +742,8 @@ void Player::applySeek(qint64 positionMs, double rate)
 
     const GstSeekFlags flags =
         static_cast<GstSeekFlags>(GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE);
-    // playbin har inga sink-pads, så en seek på topp-pipelinen når inte fram.
-    // Skicka seek till varje playbin (video- och ljudströmmen) i stället.
+    // playbin has no sink pads, so a seek on the top pipeline does not reach it.
+    // Send the seek to each playbin (video and audio streams) instead.
     const gint64 start = positionMs * GST_MSECOND;
     const char *names[] = {"vplay", "aplay"};
     for (const char *name : names) {
@@ -817,7 +817,7 @@ void Player::updateProgress()
         }
     }
 
-    // Återställ position/hastighet efter ett pipeline-ombygge (upplösningsbyte).
+    // Restore position/speed after a pipeline rebuild (resolution change).
     if (m_pendingSeek >= 0 && m_duration > 0) {
         const qint64 target = qBound<qint64>(0, m_pendingSeek, m_duration);
         m_pendingSeek = -1;
@@ -835,7 +835,7 @@ void Player::handleFetchOutput()
     readCookiesFromFile();
     const QJsonObject obj = QJsonDocument::fromJson(output).object();
 
-    // Tillgängliga sökbara upplösningar (HLS-videoströmmar), högst först.
+    // Available seekable resolutions (HLS video streams), highest first.
     QVariantList heights;
     const QJsonArray formats = obj.value(QStringLiteral("formats")).toArray();
     for (const QJsonValue &value : formats) {
@@ -856,15 +856,15 @@ void Player::handleFetchOutput()
         emit resolutionsChanged();
     }
 
-    // Tillgängliga undertextspår (manuella först, sedan automatiska).
+    // Available subtitle tracks (manual first, then automatic).
     QVariantList tracks;
     QSet<QString> seen;
     QSet<QString> names;
     const QJsonObject manualSubs = obj.value(QStringLiteral("subtitles")).toObject();
     const QJsonObject autoSubs = obj.value(QStringLiteral("automatic_captions")).toObject();
 
-    // json3-URL per språkkod; används även som reserv för regionala varianter
-    // (t.ex. "de-DE") som annars bara erbjuds som m3u8-playlist.
+    // json3 URL per language code; also used as a fallback for regional variants
+    // (for example "de-DE") that are otherwise only offered as an m3u8 playlist.
     const auto collectJson3 = [](const QJsonObject &source) {
         QHash<QString, QString> map;
         for (auto it = source.constBegin(); it != source.constEnd(); ++it) {
@@ -953,7 +953,7 @@ void Player::handleFetchOutput()
     emit loadingChanged();
 
     if (videoUrl.isEmpty()) {
-        emit errorOccurred(QStringLiteral("Inga strömmar hittades för videon"));
+        emit errorOccurred(QStringLiteral("No streams found for this video"));
         return;
     }
 
@@ -970,21 +970,21 @@ void Player::handleFetchOutput()
 void Player::buildPipeline()
 {
     if (m_item == nullptr) {
-        emit errorOccurred(QStringLiteral("Video-ytan är inte kopplad"));
+        emit errorOccurred(QStringLiteral("Video surface is not connected"));
         return;
     }
     if (m_videoUrl.isEmpty()) {
-        emit errorOccurred(QStringLiteral("Inga strömmar hittades för videon"));
+        emit errorOccurred(QStringLiteral("No streams found for this video"));
         return;
     }
 
     m_pipeline = gst_pipeline_new("pipe");
 
-    // === VIDEO: playbin med qml6glsink bakom glupload/glcolorconvert ===
-    // Obs: playbin saknar skrivbar "source" – sätt bara giltiga properties,
-    // annars avbryter g_object_set och "video-sink" appliceras aldrig
-    // (då tar playbins standardsink över och öppnar ett eget fönster).
-    // qml6glsink tar endast GLMemory (RGBA/BGRA/RGB/YV12).
+    // === VIDEO: playbin with qml6glsink behind glupload/glcolorconvert ===
+    // Note: playbin has no writable "source" – set only valid properties,
+    // otherwise g_object_set fails and "video-sink" is never applied
+    // (then playbin's default sink takes over and opens its own window).
+    // qml6glsink only accepts GLMemory (RGBA/BGRA/RGB/YV12).
     GstElement *vplay = gst_element_factory_make("playbin", "vplay");
     GstElement *vbin = gst_parse_bin_from_description(
         "glupload ! glcolorconvert ! capsfilter caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" ! qml6glsink name=gsink",
@@ -995,7 +995,7 @@ void Player::buildPipeline()
     gst_bin_add(GST_BIN(m_pipeline), vplay);
 
     if (!m_audioUrl.isEmpty()) {
-        // === AUDIO: egen playbin i samma pipeline (delad klocka => synk) ===
+        // === AUDIO: separate playbin in the same pipeline (shared clock => sync) ===
         GstElement *aplay = gst_element_factory_make("playbin", "aplay");
         g_object_set(aplay, "uri", m_audioUrl.toUtf8().constData(),
                      "audio-sink", gst_parse_bin_from_description("autoaudiosink", TRUE, nullptr),
@@ -1017,9 +1017,9 @@ void Player::buildPipeline()
     g_signal_connect(gst_element_get_bus(m_pipeline), "message",
                      G_CALLBACK(onBusMessage), this);
 
-    // Starta via en scenegraph-uppdatering så att GL-kontexten som är aktiv när
-    // pipelinen startar är PlayerWindow:s (annars ritar qml6glsink i den
-    // kontext som senast renderade).
+    // Start through a scene graph update, so the GL context that is active when
+    // the pipeline starts is the PlayerWindow's (otherwise qml6glsink draws in
+    // whichever context rendered last).
     QQuickWindow *win = m_item->window();
     gst_element_set_state(m_pipeline, GST_STATE_READY);
 

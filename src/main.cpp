@@ -20,8 +20,8 @@
 #define GL_RENDERER 0x1F01
 #endif
 
-// Startar spelaren som en egen process med ett eget QQuickWindow/GL-kontext.
-// Huvudfönstret ("YtGst") förblir öppet medan "YtGst Player" spelar.
+// Starts the player as a separate process with its own QQuickWindow/GL context.
+// The main window ("YtGst") stays open while "YtGst Player" plays.
 class Launcher : public QObject
 {
     Q_OBJECT
@@ -38,8 +38,9 @@ public:
     }
 };
 
-// Hämtar GL-renderaren (t.ex. "llvmpipe" vid mjukvarurendering) via en
-// separat, dold GL-kontext så att vi slipper röra scenografens kontext.
+// Reads the GL renderer (for example "llvmpipe" when rendering in software)
+// through a separate hidden GL context, so we do not touch the scene graph's
+// context.
 static QString currentRenderer()
 {
     QOffscreenSurface surface;
@@ -63,8 +64,8 @@ static QString currentRenderer()
     return renderer;
 }
 
-// Sammanställer startproblem som gör att GPU-acceleration inte fungerar:
-// saknad hårdvaruavkodare, saknad qml6glsink eller mjukvarurendering.
+// Collects startup problems that prevent GPU acceleration:
+// missing hardware decoder, missing qml6glsink or software rendering.
 static QStringList startupProblems()
 {
     QStringList problems;
@@ -81,9 +82,9 @@ static QStringList startupProblems()
             gst_object_unref(feature);
         } else {
             problems << QStringLiteral(
-                "Hårdvaruavkodaren \"%1\" hittades inte – installera "
-                "gstreamer1.0-vaapi och en fungerande VA-API-drivrutin (t.ex. "
-                "i965-va-driver eller intel-media-va-driver).")
+                "The hardware decoder \"%1\" was not found – install "
+                "gstreamer1.0-vaapi and a working VA-API driver (for example "
+                "i965-va-driver or intel-media-va-driver).")
                              .arg(QString::fromLatin1(decoderName));
         }
     }
@@ -93,15 +94,15 @@ static QStringList startupProblems()
         gst_object_unref(sink);
     } else {
         problems << QStringLiteral(
-            "qml6glsink saknas – installera gstreamer1.0-qt6.");
+            "qml6glsink is missing – install gstreamer1.0-qt6.");
     }
 
     const QString renderer = currentRenderer();
     const QString low = renderer.toLower();
     if (low.contains("llvmpipe") || low.contains("softpipe") || low.contains("swiftshader")) {
         problems << QStringLiteral(
-            "Mjukvarurendering upptäckt (%1). YtGst vägrar köra utan "
-            "fungerande GPU-drivrutin.")
+            "Software rendering detected (%1). YtGst refuses to run without a "
+            "working GPU driver.")
                          .arg(renderer);
     }
 
@@ -110,8 +111,8 @@ static QStringList startupProblems()
 
 int main(int argc, char *argv[])
 {
-    // VA-API-drivrutin: använd CMake-flaggan YTGST_VAAPI_DRIVER om den är satt,
-    // annars auto-väljs i965 om den finns (Haswell), så vah264dec fungerar.
+    // VA-API driver: use the YTGST_VAAPI_DRIVER CMake flag if set, otherwise
+    // i965 is auto-selected if present (Haswell), so vah264dec works.
 #ifdef YTGST_VAAPI_DRIVER
     const QString configuredVa = QStringLiteral(YTGST_VAAPI_DRIVER);
 #else
@@ -125,8 +126,8 @@ int main(int argc, char *argv[])
 
     gst_init(&argc, &argv);
 
-    // Prioritera vald videodekoder (YTGST_VIDEO_DECODER, t.ex. vah264dec)
-    // framför övriga, så playbin väljer hårdvaruavkodning i första hand.
+    // Prioritise the configured video decoder (YTGST_VIDEO_DECODER, for example
+    // vah264dec) over the others, so playbin chooses hardware decoding first.
 #ifdef YTGST_VIDEO_DECODER
     {
         const QByteArray decoder = QByteArrayLiteral(YTGST_VIDEO_DECODER);
@@ -137,18 +138,18 @@ int main(int argc, char *argv[])
                 gst_plugin_feature_set_rank(feature, GST_RANK_PRIMARY + 1);
                 gst_object_unref(feature);
             } else {
-                qWarning("Videodekodern \"%s\" hittades inte – varning visas vid start",
+                qWarning("Video decoder \"%s\" not found – a warning is shown at startup",
                          decoder.constData());
             }
         }
     }
 #endif
 
-    // qml6glsink-pluginet MÅSTE laddas innan QML-motorn skapas,
-    // för att registrera GstGLQt6VideoItem-typen i QML.
+    // The qml6glsink plugin MUST be loaded before the QML engine is created,
+    // to register the GstGLQt6VideoItem type in QML.
     GstElement *sink = gst_element_factory_make("qml6glsink", nullptr);
     if (!sink) {
-        qWarning("qml6glsink saknas – installation av gstreamer1.0-qt6 krävs");
+        qWarning("qml6glsink is missing – install gstreamer1.0-qt6");
     } else {
         gst_object_unref(sink);
     }
@@ -191,14 +192,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Visa en varningsruta vid start om GPU-acceleration inte fungerar.
+    // Show a warning dialog at startup if GPU acceleration is unavailable.
     if (!problems.isEmpty()) {
         QTimer::singleShot(600, &app, [problems]() {
             QMessageBox *box = new QMessageBox(
                 QMessageBox::Warning,
-                QStringLiteral("YtGst – varning"),
-                QStringLiteral("YtGst har upptäckt problem som hindrar "
-                               "GPU-accelererad uppspelning:"),
+                QStringLiteral("YtGst – warning"),
+                QStringLiteral("YtGst detected problems that prevent "
+                               "GPU-accelerated playback:"),
                 QMessageBox::Ok);
             box->setInformativeText(problems.join(QLatin1Char('\n')));
             box->setWindowModality(Qt::ApplicationModal);

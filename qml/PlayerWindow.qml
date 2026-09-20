@@ -18,7 +18,7 @@ Window {
     property string videoTitle: ""
     property bool standalone: false
 
-    // Styrningen visas vid musrörelse och tonas ut efter 5 s utan rörelse.
+    // Controls appear on mouse movement and fade out after 5 s without motion.
     property bool controlsVisible: true
     readonly property bool controlsShown: controlsVisible || !player.playing
 
@@ -59,7 +59,7 @@ Window {
         visible: true
     }
 
-    // Fångar mushover över hela fönstret utan att stjäla klick.
+    // Captures mouse hover over the whole window without stealing clicks.
     MouseArea {
         id: hoverArea
         anchors.fill: parent
@@ -70,7 +70,7 @@ Window {
         z: 1
     }
 
-    // Släcker styrningen efter 5 s utan musrörelse.
+    // Hides the controls after 5 s without mouse movement.
     Timer {
         id: hideTimer
         interval: 5000
@@ -103,7 +103,7 @@ Window {
         }
     }
 
-    // Progressbar i YouTube-stil, i full bredd och lyft ~5 mm från nederkanten.
+    // YouTube-style progress bar, full width and lifted ~5 mm from the bottom.
     Item {
         id: progressBar
         anchors.left: parent.left
@@ -206,7 +206,7 @@ Window {
         }
     }
 
-    // Play/paus-knapp (visas vid hover eller när videon är pausad).
+    // Play/pause button (shown on hover or when the video is paused).
     Rectangle {
         id: playButton
         width: 40
@@ -261,7 +261,7 @@ Window {
         }
     }
 
-    // Hastighetsknapp med meny (0.25x–2x).
+    // Speed button with menu (0.25x–2x).
     Rectangle {
         id: speedButton
         width: 52
@@ -310,7 +310,7 @@ Window {
         }
     }
 
-    // Upplösningsknapp med meny (Auto + tillgängliga HLS-upplösningar).
+    // Resolution button with menu (Auto + available HLS resolutions).
     Rectangle {
         id: resolutionButton
         width: Math.max(52, resolutionText.implicitWidth + 22)
@@ -368,7 +368,7 @@ Window {
             ? player.resolutions[0] : 0
     }
 
-    // Undertext-knapp (CC) med meny. Visas bara om videon har spår.
+    // Subtitle button (CC) with menu. Shown only if the video has tracks.
     Rectangle {
         id: subtitleButton
         width: 46
@@ -407,7 +407,7 @@ Window {
             x: (subtitleButton.width - width) / 2
 
             MenuItem {
-                text: qsTr("Av")
+                text: qsTr("Off")
                 font.bold: player.subtitleLanguage.length === 0
                 onTriggered: player.setSubtitleLanguage("")
             }
@@ -422,7 +422,7 @@ Window {
         }
     }
 
-    // Fullskärmsknapp. Esc lämnar fullskärm (och stänger annars fönstret).
+    // Fullscreen button. Esc leaves fullscreen (and otherwise closes the window).
     Rectangle {
         id: fullscreenButton
         width: 40
@@ -481,7 +481,7 @@ Window {
         }
     }
 
-    // Nedladdningsknapp. Klick startar nedladdning, klick igen avbryter.
+    // Download button. Click starts the download, click again cancels.
     Rectangle {
         id: downloadButton
         width: 40
@@ -539,7 +539,7 @@ Window {
         }
     }
 
-    // Statusruta för nedladdning, ovanför nedladdningsknappen.
+    // Download status toast, above the download button.
     Rectangle {
         id: downloadToast
         visible: player.downloadStatus.length > 0
@@ -563,7 +563,7 @@ Window {
         }
     }
 
-    // Volymkontroll. Klick på ikonen visar ett vertikalt reglage ovanför.
+    // Volume control. Clicking the icon shows a vertical slider above.
     Item {
         id: volumeControl
         property bool expanded: false
@@ -577,7 +577,7 @@ Window {
         visible: opacity > 0.01
         Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
 
-        // Panel med vertikalt reglage, ovanför knappen.
+        // Panel with vertical slider, above the button.
         Rectangle {
             id: volumePanel
             visible: volumeControl.expanded
@@ -704,7 +704,7 @@ Window {
         }
     }
 
-    // Undertextöverlägg ovanför kontrollerna.
+    // Subtitle overlay above the controls.
     Rectangle {
         id: subtitleBox
         visible: player.subtitleText.length > 0
