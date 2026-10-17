@@ -92,14 +92,42 @@ static bool parseVttTimestamp(const QString &value, qint64 *ms)
 // Builds the yt-dlp format string. height <= 0 means the best available
 // (seekable) HLS stream. HLS is chosen first because GStreamer cannot seek
 // in YouTube's DASH/mp4 streams.
+//
+// The STM32MP25 VPU only has stateless H.264 and VP8 decoders (v4l2slh264dec,
+// v4l2slvp8dec), while YouTube serves VP9/AV1 by default - and libav's software
+// VP9 decoder is far too slow for the two Cortex-A35 cores. On that target the
+// video therefore has to be pinned to H.264, or yt-dlp hands over a stream that
+// is either unplayable or runs at a few frames per second. Everywhere else (no
+// v4l2slh264dec in the registry at all) keep yt-dlp's own choice, so VP9/AV1
+// still play - decoded in software or on the GPU.
+static bool preferH264()
+{
+    static const bool onlyH264 = []() -> bool {
+        gst_init(nullptr, nullptr); // idempotent; the registry needs it
+        if (!gst_element_factory_find("v4l2slh264dec"))
+            return false;
+        return !gst_element_factory_find("v4l2slvp9dec")
+            && !gst_element_factory_find("v4l2slav1dec");
+    }();
+    return onlyH264;
+}
+
+// Builds the yt-dlp format string. height <= 0 means the best available
+// (seekable) HLS stream. HLS is chosen first because GStreamer cannot seek
+// in YouTube's DASH/mp4 streams.
 static QString formatForHeight(int height)
 {
+    const QString codec = preferH264() ? QStringLiteral("[vcodec^=avc1]") : QString();
     if (height > 0) {
-        return QStringLiteral("bestvideo[height<=%1][protocol^=m3u8]+bestaudio[protocol^=m3u8]"
-                              "/bestvideo[height<=%1]+bestaudio/best")
-            .arg(height);
+        return QStringLiteral("bestvideo[height<=%1]%2[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
+                              "/bestvideo[height<=%1]%2+bestaudio"
+                              "/best[height<=%1]%2")
+            .arg(height)
+            .arg(codec);
     }
-    return QStringLiteral("bestvideo[protocol^=m3u8]+bestaudio[protocol^=m3u8]/bestvideo+bestaudio/best");
+    return QStringLiteral("bestvideo%1[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
+                          "/bestvideo%1+bestaudio/best%1")
+        .arg(codec);
 }
 
 // Picks an installed browser to fetch YouTube cookies from.
@@ -1072,6 +1100,11 @@ void Player::onBusMessage(GstBus *bus, GstMessage *msg, gpointer userData)
             gchar *debug = nullptr;
             gst_message_parse_error(msg, &error, &debug);
             const QString message = QString::fromUtf8(error->message);
+            // Without this the reason a stream fails never reaches the journal,
+            // only the QML error label - and most failures happen before that.
+            qWarning("YtGst: GStreamer error: %s", error->message);
+            if (debug)
+                qWarning("YtGst: GStreamer debug: %s", debug);
             g_error_free(error);
             g_free(debug);
             self->stop();
