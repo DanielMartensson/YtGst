@@ -112,20 +112,23 @@ static bool preferH264()
     return onlyH264;
 }
 
-// Builds the yt-dlp format string. height <= 0 means the best available
-// (seekable) HLS stream. HLS is chosen first because GStreamer cannot seek
-// in YouTube's DASH/mp4 streams.
+// Builds the yt-dlp format string. height <= 0 means the best available stream.
+// DASH/mp4 is chosen first: seekable and it plays through qtdemux on the target;
+// HLS/m3u8 is the fallback. Where the hardware only has H.264/VP8 decoders the
+// codec is pinned as well, see preferH264() above.
 static QString formatForHeight(int height)
 {
     const QString codec = preferH264() ? QStringLiteral("[vcodec^=avc1]") : QString();
     if (height > 0) {
-        return QStringLiteral("bestvideo[height<=%1]%2[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
+        return QStringLiteral("bestvideo[height<=%1]%2[protocol^=mp4]+bestaudio[protocol^=mp4]"
+                              "/bestvideo[height<=%1]%2[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
                               "/bestvideo[height<=%1]%2+bestaudio"
                               "/best[height<=%1]%2")
             .arg(height)
             .arg(codec);
     }
-    return QStringLiteral("bestvideo%1[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
+    return QStringLiteral("bestvideo%1[protocol^=mp4]+bestaudio[protocol^=mp4]"
+                          "/bestvideo%1[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
                           "/bestvideo%1+bestaudio/best%1")
         .arg(codec);
 }
