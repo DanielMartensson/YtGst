@@ -14,6 +14,8 @@
 #include <QRegularExpression>
 
 #include <cstring>
+#include <clocale>
+#include <langinfo.h>
 
 #include <gst/gst.h>
 
@@ -134,8 +136,36 @@ static QString videoIdFrom(const QString &text)
     return match.hasMatch() ? match.captured(1) : QString();
 }
 
+// ---------------------------------------------------------------------------
+// A UTF-8 character type
+// ---------------------------------------------------------------------------
+//
+// The image ships en_US.UTF-8 in /usr/lib/locale/locale-archive, but sessions
+// start with LANG=C, and Qt then warns that it depends on a UTF-8 locale. That
+// warning is printed once per Qt process, and Qt's text handling really does
+// want UTF-8: with an ASCII character type, QString::fromLocal8Bit() mangles
+// non-ASCII paths, titles and environment values.
+//
+// Only LC_CTYPE is changed. Number, date and collation formats keep following
+// whatever the session asks for, and LANG is left alone, so the language used
+// for search results and subtitles does not change.
+static void preferUtf8CharacterType()
+{
+    if (setlocale(LC_CTYPE, "") == nullptr)
+        return;
+    const QByteArray codeset = nl_langinfo(CODESET);
+    if (codeset == "UTF-8")
+        return;
+    if (setlocale(LC_CTYPE, "en_US.UTF-8") == nullptr)
+        return;   // no UTF-8 locale in the image; nothing to switch to
+    qputenv("LC_CTYPE", "en_US.UTF-8");
+    qInfo("YtGst: character type was %s, using en_US.UTF-8", codeset.constData());
+}
+
 int main(int argc, char *argv[])
 {
+    preferUtf8CharacterType();
+
     // qml6glsink must share an OpenGL context with the Qt scene graph, so the
     // scene graph can draw the GStreamer GLMemory textures in the PlayerWindow.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
