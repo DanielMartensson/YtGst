@@ -49,8 +49,75 @@ Window {
 
     readonly property bool fullscreen: visibility === Window.FullScreen
 
+    // The compositor does not hand the windowed size back when fullscreen is
+    // left: it answers with a 0x0 configure, which means "pick one yourself",
+    // and the window comes back at whatever size Qt was left with (very large,
+    // or very small). So remember the size the window has in windowed mode and
+    // put it back by hand, both right away and once more after the compositor
+    // has sent its own size. While that handover runs, the sizes the compositor
+    // reports must not overwrite the remembered one.
+    // A plain value, not a binding to width/height - a binding would follow the
+    // window into fullscreen and "restore" the fullscreen size afterwards.
+    property size windowedSize: Qt.size(960, 540)
+    property bool restoringSize: false
+
+    function rememberWindowedSize() {
+        // Sizes under the window's minimum are not sizes the window ever had on
+        // purpose (a 0x0 configure, or the moment fullscreen is entered).
+        if (visibility === Window.Windowed && !restoringSize
+                && width >= minimumWidth && height >= minimumHeight)
+            windowedSize = Qt.size(width, height);
+    }
+
+    onWidthChanged: rememberWindowedSize()
+    onHeightChanged: rememberWindowedSize()
+
+    function restoreWindowedSize() {
+        if (windowedSize.width < minimumWidth || windowedSize.height < minimumHeight)
+            return;
+        // Unconditional: leaving fullscreen leaves the window at the fullscreen
+        // size, which is larger than the remembered one.
+        if (width !== windowedSize.width)
+            width = windowedSize.width;
+        if (height !== windowedSize.height)
+            height = windowedSize.height;
+    }
+
+    function leaveFullscreen() {
+        restoringSize = true;
+        visibility = Window.Windowed;
+        restoreWindowedSize();
+        sizeRestoreTimer.restart();
+    }
+
     function toggleFullscreen() {
-        visibility = fullscreen ? Window.Windowed : Window.FullScreen;
+        if (fullscreen) {
+            leaveFullscreen();
+        } else {
+            if (width >= minimumWidth && height >= minimumHeight)
+                windowedSize = Qt.size(width, height);
+            visibility = Window.FullScreen;
+        }
+    }
+
+    // Second chance once the compositor's own resize has arrived.
+    Timer {
+        id: sizeRestoreTimer
+        interval: 600
+        onTriggered: {
+            playerWindow.restoreWindowedSize();
+            playerWindow.restoringSize = false;
+        }
+    }
+
+    onVisibilityChanged: {
+        // Fullscreen can also be left by the compositor (a keybinding of its
+        // own), not only through toggleFullscreen(), so watch the state too.
+        if (visibility === Window.Windowed && !restoringSize) {
+            restoringSize = true;
+            restoreWindowedSize();
+            sizeRestoreTimer.restart();
+        }
     }
 
     GstGLQt6VideoItem {
@@ -89,11 +156,20 @@ Window {
         z: 2
     }
 
+    // A message can be shown while playback continues (for example "no sound
+    // server for this user"), so it must not stay over the picture forever.
+    Timer {
+        id: errorClearTimer
+        interval: 8000
+        onTriggered: errorLabel.text = ""
+    }
+
     Player {
         id: player
         videoItem: videoSurface
         onErrorOccurred: (message) => {
             errorLabel.text = message;
+            errorClearTimer.restart();
         }
         onPlayingChanged: {
             if (playing)
@@ -310,7 +386,7 @@ Window {
         }
     }
 
-    // Resolution button with menu (Auto + available HLS resolutions).
+    // Resolution button with menu (Auto + available resolutions).
     Rectangle {
         id: resolutionButton
         width: Math.max(52, resolutionText.implicitWidth + 22)
@@ -350,7 +426,10 @@ Window {
             x: (resolutionButton.width - width) / 2
 
             MenuItem {
-                text: qsTr("Auto")
+                // yt-dlp needs ~20 s on the STM32MP25 before the format list is
+                // in, so say that the list is coming while it is still empty.
+                text: player.resolutions.length === 0
+                    ? qsTr("Auto (loading resolutions…)") : qsTr("Auto")
                 font.bold: player.resolution >= resolutionButton.maxAvailableHeight
                 onTriggered: player.setResolution(0)
             }
@@ -785,7 +864,7 @@ Window {
         sequence: "Esc"
         onActivated: {
             if (playerWindow.fullscreen)
-                playerWindow.visibility = Window.Windowed;
+                playerWindow.leaveFullscreen();
             else
                 playerWindow.close();
         }

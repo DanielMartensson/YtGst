@@ -22,6 +22,10 @@
 #include <QVariantMap>
 
 #include <algorithm>
+#include <cstdio>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <gst/gst.h>
 
@@ -89,10 +93,6 @@ static bool parseVttTimestamp(const QString &value, qint64 *ms)
     return true;
 }
 
-// Builds the yt-dlp format string. height <= 0 means the best available
-// (seekable) HLS stream. HLS is chosen first because GStreamer cannot seek
-// in YouTube's DASH/mp4 streams.
-//
 // The STM32MP25 VPU only has stateless H.264 and VP8 decoders (v4l2slh264dec,
 // v4l2slvp8dec), while YouTube serves VP9/AV1 by default - and libav's software
 // VP9 decoder is far too slow for the two Cortex-A35 cores. On that target the
@@ -113,24 +113,37 @@ static bool preferH264()
 }
 
 // Builds the yt-dlp format string. height <= 0 means the best available stream.
-// DASH/mp4 is chosen first: seekable and it plays through qtdemux on the target;
-// HLS/m3u8 is the fallback. Where the hardware only has H.264/VP8 decoders the
-// codec is pinned as well, see preferH264() above.
+//
+// HLS/m3u8 comes first and DASH/mp4 (protocol "https") second. Measured on the
+// target: qtdemux refuses to seek in YouTube's fragmented DASH mp4 (the seek
+// returns false and the position just keeps running), while the HLS video
+// stream seeks exactly - and "gst-discoverer" reports "Seekable: yes" for both,
+// so only an actual seek tells them apart. yt-dlp names the protocols
+// "m3u8_native" and "https" (older releases: "m3u8"/"mp4"), so match the
+// prefixes - matching the wrong name means the first alternative silently never
+// applies. Where the hardware only has H.264/VP8 decoders the codec is pinned as
+// well, see preferH264() above.
 static QString formatForHeight(int height)
 {
     const QString codec = preferH264() ? QStringLiteral("[vcodec^=avc1]") : QString();
+    const QString hls = QStringLiteral("[protocol^=m3u8]");
+    const QString dash = QStringLiteral("[protocol^=https]");
     if (height > 0) {
-        return QStringLiteral("bestvideo[height<=%1]%2[protocol^=mp4]+bestaudio[protocol^=mp4]"
-                              "/bestvideo[height<=%1]%2[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
+        return QStringLiteral("bestvideo[height<=%1]%2%3+bestaudio%3"
+                              "/bestvideo[height<=%1]%2%4+bestaudio%4"
                               "/bestvideo[height<=%1]%2+bestaudio"
                               "/best[height<=%1]%2")
             .arg(height)
-            .arg(codec);
+            .arg(codec)
+            .arg(hls)
+            .arg(dash);
     }
-    return QStringLiteral("bestvideo%1[protocol^=mp4]+bestaudio[protocol^=mp4]"
-                          "/bestvideo%1[protocol^=m3u8]+bestaudio[protocol^=m3u8]"
+    return QStringLiteral("bestvideo%1%2+bestaudio%2"
+                          "/bestvideo%1%3+bestaudio%3"
                           "/bestvideo%1+bestaudio/best%1")
-        .arg(codec);
+        .arg(codec)
+        .arg(hls)
+        .arg(dash);
 }
 
 // Picks an installed browser to fetch YouTube cookies from.
@@ -197,6 +210,17 @@ Player::Player(QObject *parent)
     : QObject(parent)
 {
     m_urlFetch.setProcessChannelMode(QProcess::SeparateChannels);
+
+    // YTGST_HEIGHT=<n> starts playback at that height instead of the 480p
+    // default. The resolution menu in the window overrides it; this is meant
+    // for measuring and for scripted playback, where no menu can be clicked.
+    const QByteArray startHeight = qgetenv("YTGST_HEIGHT");
+    if (!startHeight.isEmpty()) {
+        bool ok = false;
+        const int height = startHeight.toInt(&ok);
+        if (ok && height >= 0)
+            m_requestedHeight = height;
+    }
 
     m_tick = new QTimer(this);
     m_tick->setInterval(250);
@@ -858,6 +882,15 @@ void Player::updateProgress()
     }
 
     updateSubtitleCue();
+
+    if (m_sinkBufferClock.isValid() && m_sinkBufferClock.elapsed() >= 2000) {
+        const int total = m_sinkBuffers.load();
+        const double seconds = m_sinkBufferClock.restart() / 1000.0;
+        if (seconds > 0.0)
+            fprintf(stderr, "YtGst: video sink: %d frames in %.1f s = %.1f fps\n",
+                    total - m_sinkBuffersLast, seconds, (total - m_sinkBuffersLast) / seconds);
+        m_sinkBuffersLast = total;
+    }
 }
 
 void Player::handleFetchOutput()
@@ -866,18 +899,34 @@ void Player::handleFetchOutput()
     readCookiesFromFile();
     const QJsonObject obj = QJsonDocument::fromJson(output).object();
 
-    // Available seekable resolutions (HLS video streams), highest first.
+    // Available resolutions, highest first. Only offer what the format string
+    // can deliver: the HLS ladder when there is one (it is what gets picked),
+    // otherwise the DASH/mp4 ladder. yt-dlp reports the protocols as
+    // "m3u8_native" and "https" (older releases: "m3u8"/"mp4"), so match on the
+    // prefixes - a strict comparison against the wrong name rejects every format
+    // and leaves the menu empty. When the hardware decodes H.264 only, every
+    // stream is pinned to H.264, so other codecs must not be listed either.
     QVariantList heights;
+    const bool onlyH264 = preferH264();
     const QJsonArray formats = obj.value(QStringLiteral("formats")).toArray();
-    for (const QJsonValue &value : formats) {
-        const QJsonObject format = value.toObject();
-        if (format.value(QStringLiteral("vcodec")).toString() == QLatin1String("none"))
-            continue;
-        if (!format.value(QStringLiteral("protocol")).toString().startsWith(QLatin1String("m3u8")))
-            continue;
-        const int h = format.value(QStringLiteral("height")).toInt();
-        if (h > 0 && !heights.contains(h))
-            heights.append(h);
+    for (int pass = 0; pass < 2 && heights.isEmpty(); ++pass) {
+        for (const QJsonValue &value : formats) {
+            const QJsonObject format = value.toObject();
+            const QString vcodec = format.value(QStringLiteral("vcodec")).toString();
+            if (vcodec.isEmpty() || vcodec == QLatin1String("none"))
+                continue;
+            if (onlyH264 && !vcodec.startsWith(QLatin1String("avc1")))
+                continue;
+            const QString proto = format.value(QStringLiteral("protocol")).toString();
+            const bool hls = proto.startsWith(QLatin1String("m3u8"));
+            const bool dash = proto.startsWith(QLatin1String("https"))
+                || proto.startsWith(QLatin1String("mp4"));
+            if (pass == 0 ? !hls : !dash)
+                continue;
+            const int h = format.value(QStringLiteral("height")).toInt();
+            if (h > 0 && !heights.contains(h))
+                heights.append(h);
+        }
     }
     std::sort(heights.begin(), heights.end(), [](const QVariant &a, const QVariant &b) {
         return a.toInt() > b.toInt();
@@ -998,6 +1047,85 @@ void Player::handleFetchOutput()
     buildPipeline();
 }
 
+// Makes the audio sink able to reach the session's sound server, and reports
+// whether one was found at all.
+//
+// The plain case needs nothing: $XDG_RUNTIME_DIR is the session's runtime
+// directory and pulsesink finds pulse/native on its own. Two launcher setups
+// break that, and both are handled here by naming the socket in PULSE_SERVER:
+//
+//   * the player inherits an XDG_RUNTIME_DIR that is not the session's. On
+//     Watermelon Wine weston.service sets /home/weston, so the sound server in
+//     /run/user/1000 is never looked at, even though it belongs to the same
+//     user (the socket is then in /run/user/<our uid>, and libpulse accepts it
+//     once it is pointed at);
+//   * the player runs as root inside the user's session. libpulse refuses that
+//     runtime directory ("is not owned by us"), but connects when the socket is
+//     named - root may open it regardless of the permissions.
+static bool prepareSoundServer()
+{
+    if (!qgetenv("PULSE_SERVER").isEmpty())
+        return true;
+
+    const QByteArray runtimeDir = qgetenv("XDG_RUNTIME_DIR");
+    const QByteArray ownDir = QByteArrayLiteral("/run/user/") + QByteArray::number(getuid());
+    struct stat info {};
+
+    const QByteArray sessionSocket = runtimeDir + QByteArrayLiteral("/pulse/native");
+    if (!runtimeDir.isEmpty()
+        && ::stat(sessionSocket.constData(), &info) == 0
+        && S_ISSOCK(info.st_mode) && info.st_uid == getuid())
+        return true;
+
+    const QByteArray ownSocket = ownDir + QByteArrayLiteral("/pulse/native");
+    if (::stat(ownSocket.constData(), &info) == 0
+        && S_ISSOCK(info.st_mode) && info.st_uid == getuid()) {
+        qputenv("PULSE_SERVER", QByteArrayLiteral("unix:") + ownSocket);
+        qWarning("YtGst: sound server is not in XDG_RUNTIME_DIR - using %s",
+                 ownSocket.constData());
+        return true;
+    }
+
+    if (getuid() == 0) {
+        const QDir runUser(QStringLiteral("/run/user"));
+        const QStringList entries =
+            runUser.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QString &entry : entries) {
+            const QByteArray path = QByteArrayLiteral("/run/user/") + entry.toLocal8Bit()
+                + QByteArrayLiteral("/pulse/native");
+            if (::stat(path.constData(), &info) == 0 && S_ISSOCK(info.st_mode)) {
+                qputenv("PULSE_SERVER", QByteArrayLiteral("unix:") + path);
+                qWarning("YtGst: using the sound server of uid %u (%s)",
+                         static_cast<unsigned>(info.st_uid), path.constData());
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Picks an audio sink description that works on this system.
+// PipeWire owns the HDMI device at 48 kHz on Watermelon Wine, so route the
+// audio through it (pulsesink): it resamples the 44.1 kHz AAC of DASH mp4
+// streams and shares the device instead of fighting for it. A direct alsasink
+// cannot be used while PipeWire holds the codec ("Device or resource busy"), so
+// it is only the last resort on a system without a sound server.
+static QString audioSinkDescription()
+{
+    const char *candidates[] = {"pulsesink", "pipewiresink", "autoaudiosink", nullptr};
+    for (int i = 0; candidates[i]; ++i) {
+        GstElementFactory *factory = gst_element_factory_find(candidates[i]);
+        if (factory) {
+            gst_object_unref(factory);
+            return QString(candidates[i]);
+        }
+    }
+    return QStringLiteral(
+        "audioconvert ! audioresample ! "
+        "capsfilter caps=audio/x-raw,rate=48000,channels=2,format=S16LE "
+        "! alsasink");
+}
+
 void Player::buildPipeline()
 {
     if (m_item == nullptr) {
@@ -1010,30 +1138,51 @@ void Player::buildPipeline()
     }
 
     m_pipeline = gst_pipeline_new("pipe");
+    m_audioPlay = nullptr;
 
     // === VIDEO: playbin with qml6glsink behind glupload/glcolorconvert ===
     // Note: playbin has no writable "source" – set only valid properties,
     // otherwise g_object_set fails and "video-sink" is never applied
     // (then playbin's default sink takes over and opens its own window).
     // qml6glsink only accepts GLMemory (RGBA/BGRA/RGB/YV12).
+    QString videoSinkDescription =
+        "glupload ! glcolorconvert ! capsfilter caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" ! qml6glsink name=gsink";
+
+    // YTGST_VIDEO_SINK=<gst description> replaces the video sink chain, so the
+    // sinks can be compared on a board without rebuilding (for example
+    // YTGST_VIDEO_SINK=waylandsink).
+    const QByteArray sinkOverride = qgetenv("YTGST_VIDEO_SINK");
+    if (!sinkOverride.isEmpty())
+        videoSinkDescription = QString::fromLocal8Bit(sinkOverride);
+
     GstElement *vplay = gst_element_factory_make("playbin", "vplay");
-    GstElement *vbin = gst_parse_bin_from_description(
-        "glupload ! glcolorconvert ! capsfilter caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" ! qml6glsink name=gsink",
-        TRUE, nullptr);
+    GstElement *vbin = gst_parse_bin_from_description(videoSinkDescription.toUtf8().constData(),
+                                                      TRUE, nullptr);
     g_object_set(vplay, "uri", m_videoUrl.toUtf8().constData(),
                  "video-sink", vbin, nullptr);
     g_signal_connect(vplay, "source-setup", G_CALLBACK(onSourceSetup), nullptr);
     gst_bin_add(GST_BIN(m_pipeline), vplay);
 
     if (!m_audioUrl.isEmpty()) {
-        // === AUDIO: separate playbin in the same pipeline (shared clock => sync) ===
-        GstElement *aplay = gst_element_factory_make("playbin", "aplay");
-        g_object_set(aplay, "uri", m_audioUrl.toUtf8().constData(),
-                     "audio-sink", gst_parse_bin_from_description("autoaudiosink", TRUE, nullptr),
-                     nullptr);
-        g_signal_connect(aplay, "source-setup", G_CALLBACK(onSourceSetup), nullptr);
-        gst_bin_add(GST_BIN(m_pipeline), aplay);
-        gst_element_sync_state_with_parent(aplay);
+        if (!prepareSoundServer()) {
+            // No sound server could be found (see prepareSoundServer()). Say why
+            // there is no sound and play the picture alone, instead of letting
+            // the audio sink fail the whole pipeline with "Failed to connect:
+            // Connection refused".
+            emit errorOccurred(tr("No sound server found - playing without audio."));
+        } else {
+            // === AUDIO: separate playbin in the same pipeline (shared clock => sync) ===
+            GstElement *aplay = gst_element_factory_make("playbin", "aplay");
+            g_object_set(aplay, "uri", m_audioUrl.toUtf8().constData(),
+                         "audio-sink",
+                         gst_parse_bin_from_description(
+                             audioSinkDescription().toUtf8().constData(), TRUE, nullptr),
+                         nullptr);
+            g_signal_connect(aplay, "source-setup", G_CALLBACK(onSourceSetup), nullptr);
+            gst_bin_add(GST_BIN(m_pipeline), aplay);
+            gst_element_sync_state_with_parent(aplay);
+            m_audioPlay = aplay;
+        }
     }
 
     GstElement *gsink = gst_bin_get_by_name(GST_BIN(vbin), "gsink");
@@ -1041,6 +1190,8 @@ void Player::buildPipeline()
         g_object_set(gsink, "widget", m_item, nullptr);
         gst_object_unref(gsink);
     }
+
+    attachSinkProbe(vbin);
 
     applyVolume();
 
@@ -1070,6 +1221,39 @@ void Player::buildPipeline()
     m_tick->start();
 }
 
+// With YTGST_DEBUG_FPS=1 the buffers that reach the video sink are counted and
+// the rate is printed every couple of seconds. A sink that cannot keep up and a
+// source that cannot deliver look the same on screen, and this tells them
+// apart.
+void Player::attachSinkProbe(GstElement *videoBin)
+{
+    if (qgetenv("YTGST_DEBUG_FPS") != "1")
+        return;
+
+    GstIterator *sinks = gst_bin_iterate_sinks(GST_BIN(videoBin));
+    GValue item = G_VALUE_INIT;
+    while (gst_iterator_next(sinks, &item) == GST_ITERATOR_OK) {
+        GstElement *sink = GST_ELEMENT(g_value_get_object(&item));
+        GstPad *pad = gst_element_get_static_pad(sink, "sink");
+        if (!pad)
+            pad = gst_element_get_static_pad(sink, "video_sink");
+        if (pad) {
+            gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                              [](GstPad *, GstPadProbeInfo *, gpointer data) -> GstPadProbeReturn {
+                                  static_cast<Player *>(data)->m_sinkBuffers.fetch_add(1);
+                                  return GST_PAD_PROBE_OK;
+                              },
+                              this, nullptr);
+            gst_object_unref(pad);
+        }
+        g_value_reset(&item);
+    }
+    g_value_unset(&item);
+    gst_iterator_free(sinks);
+    m_sinkBufferClock.start();
+    fprintf(stderr, "YtGst: counting video sink frames (YTGST_DEBUG_FPS=1)\n");
+}
+
 void Player::disposePipeline()
 {
     if (m_tick)
@@ -1080,6 +1264,7 @@ void Player::disposePipeline()
         gst_object_unref(m_pipeline);
         m_pipeline = nullptr;
     }
+    m_audioPlay = nullptr;
     if (m_playing) {
         m_playing = false;
         emit playingChanged();
@@ -1108,8 +1293,18 @@ void Player::onBusMessage(GstBus *bus, GstMessage *msg, gpointer userData)
             qWarning("YtGst: GStreamer error: %s", error->message);
             if (debug)
                 qWarning("YtGst: GStreamer debug: %s", debug);
+            // A failure in the audio playbin (a sound server that went away, an
+            // HDMI hiccup) must not take the picture down with it: report it and
+            // keep playing.
+            const bool audioOnly = self->m_audioPlay
+                && GST_OBJECT(msg->src) != GST_OBJECT(self->m_pipeline)
+                && gst_object_has_as_ancestor(GST_OBJECT(msg->src), GST_OBJECT(self->m_audioPlay));
             g_error_free(error);
             g_free(debug);
+            if (audioOnly) {
+                emit self->errorOccurred(message);
+                break;
+            }
             self->stop();
             self->m_playing = false;
             emit self->playingChanged();

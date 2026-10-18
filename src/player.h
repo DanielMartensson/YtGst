@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QList>
 #include <QObject>
@@ -10,6 +11,8 @@
 #include <QString>
 #include <QVariantList>
 #include <QtQml/qqml.h>
+
+#include <atomic>
 
 #include <gst/gst.h>
 
@@ -116,13 +119,24 @@ private:
     void readDownloadOutput();
     void buildPipeline();
     void disposePipeline();
+    void attachSinkProbe(GstElement *videoBin);
     void applySeek(qint64 positionMs, double rate);
     void applyVolume();
     void updateProgress();
     static void onBusMessage(GstBus *bus, GstMessage *msg, gpointer userData);
 
     GstElement *m_pipeline = nullptr;
+    // The audio playbin inside m_pipeline (owned by it). Kept so a failure that
+    // comes from the audio side can be told apart from one that should stop
+    // playback.
+    GstElement *m_audioPlay = nullptr;
     QQuickItem *m_item = nullptr;
+    // Frame counter for YTGST_DEBUG_FPS=1: how many buffers the video sink
+    // actually consumed, so a sink that cannot keep up can be told apart from
+    // a source that cannot deliver.
+    std::atomic<int> m_sinkBuffers{0};
+    QElapsedTimer m_sinkBufferClock;
+    int m_sinkBuffersLast = 0;
     QProcess m_urlFetch;
     QNetworkAccessManager *m_net = nullptr;
     QNetworkReply *m_subtitleReply = nullptr;

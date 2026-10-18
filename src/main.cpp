@@ -11,6 +11,7 @@
 #include <QSurfaceFormat>
 #include <QTimer>
 #include <QSGRendererInterface>
+#include <QRegularExpression>
 
 #include <cstring>
 
@@ -118,6 +119,21 @@ static QStringList startupProblems()
     return problems;
 }
 
+// Extracts a YouTube video ID from a full URL (or a bare 11-char ID).
+// Returns an empty string when nothing could be extracted.
+static QString videoIdFrom(const QString &text)
+{
+    if (text.isEmpty())
+        return text;
+    if (text.size() == 11 && QRegularExpression("^[A-Za-z0-9_-]{11}$").match(text).hasMatch())
+        return text;
+    const QRegularExpression re(
+        QStringLiteral("(?i)\\b(?:youtube\\.com/(?:v/|watch\\?v=|embed/|shorts/)"
+                       "|youtu\\.be/)([A-Za-z0-9_-]{11})"));
+    const QRegularExpressionMatch match = re.match(text);
+    return match.hasMatch() ? match.captured(1) : QString();
+}
+
 int main(int argc, char *argv[])
 {
     // qml6glsink must share an OpenGL context with the Qt scene graph, so the
@@ -177,10 +193,22 @@ int main(int argc, char *argv[])
     QString playId;
     QString playTitle;
     const QStringList args = QCoreApplication::arguments();
+    const int watchIndex = args.indexOf(QStringLiteral("--watch"));
     const int playIndex = args.indexOf(QStringLiteral("--play"));
-    if (playIndex >= 0 && playIndex + 1 < args.size())
-        playId = args.at(playIndex + 1);
     const int titleIndex = args.indexOf(QStringLiteral("--title"));
+    // --watch <URL> plays directly in one window (standalone PlayerWindow),
+    // e.g.: ytgst --watch https://www.youtube.com/watch?v=abc123xyz
+    if (watchIndex >= 0 && watchIndex + 1 < args.size()) {
+        const QString url = args.at(watchIndex + 1);
+        const QString id = videoIdFrom(url);
+        if (id.isEmpty()) {
+            qWarning("YtGst: no video ID found in --watch URL \"%1\"", url);
+        } else {
+            playId = id;
+            playTitle = url;
+        }
+    } else if (playIndex >= 0 && playIndex + 1 < args.size())
+        playId = videoIdFrom(args.at(playIndex + 1));
     if (titleIndex >= 0 && titleIndex + 1 < args.size())
         playTitle = args.at(titleIndex + 1);
 
