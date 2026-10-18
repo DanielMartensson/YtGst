@@ -440,6 +440,11 @@ void Player::setVideoItem(QQuickItem *item)
     m_item = item;
 }
 
+void Player::setSinkDisplay(const QString &display)
+{
+    m_sinkDisplay = display;
+}
+
 void Player::play(const QString &videoId)
 {
     if (videoId.isEmpty())
@@ -1209,7 +1214,7 @@ static QString audioSinkDescription()
 
 void Player::buildPipeline()
 {
-    if (m_item == nullptr) {
+    if (m_item == nullptr && m_sinkDisplay.isEmpty()) {
         emit errorOccurred(QStringLiteral("Video surface is not connected"));
         return;
     }
@@ -1236,11 +1241,23 @@ void Player::buildPipeline()
     // the sink). The dynamic pads are linked in onHlsdemuxPadAdded() and
     // onDemuxPadAdded().
     QString videoSinkDescription = QStringLiteral(YTGST_VIDEO_SINK);
-    if (videoSinkDescription.isEmpty())
-        videoSinkDescription = QStringLiteral(
-            "glupload ! glcolorconvert ! capsfilter "
-            "caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" "
-            "! qml6glsink name=gsink");
+    if (videoSinkDescription.isEmpty()) {
+        if (m_sinkDisplay.isEmpty()) {
+            // No compositor of our own: upload the decoder's frames into the
+            // QML scene graph and let qml6glsink draw them as a texture there.
+            videoSinkDescription = QStringLiteral(
+                "glupload ! glcolorconvert ! capsfilter "
+                "caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" "
+                "! qml6glsink name=gsink");
+        } else {
+            // PlayerWindow.qml runs a Wayland compositor of its own (see
+            // sinkDisplay). waylandsink hands the decoder's dmabuf straight to
+            // it, the way it hands it to Weston, and the compositor draws the
+            // surface inside the player window through a ShellSurfaceItem:
+            // no copy through system memory and no window of its own.
+            videoSinkDescription = QStringLiteral("waylandsink name=gsink");
+        }
+    }
 
     // YTGST_VIDEO_SINK=<gst description> replaces the video sink chain, so the
     // sinks can be compared on a board without rebuilding (for example
@@ -1327,9 +1344,18 @@ void Player::buildPipeline()
         }
     }
 
+    // The named element at the end of the chain is either the QML sink (which
+    // draws into the QML item) or waylandsink (which draws into the socket of
+    // the compositor that window runs).
     GstElement *gsink = findElementByName(vbin, "gsink");
     if (gsink) {
-        g_object_set(gsink, "widget", m_item, nullptr);
+        GstElementFactory *factory = gst_element_get_factory(gsink);
+        const gchar *factoryName = factory
+            ? gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)) : nullptr;
+        if (m_item && g_strcmp0(factoryName, "qml6glsink") == 0)
+            g_object_set(gsink, "widget", m_item, nullptr);
+        else if (!m_sinkDisplay.isEmpty() && g_strcmp0(factoryName, "waylandsink") == 0)
+            g_object_set(gsink, "display", m_sinkDisplay.toUtf8().constData(), nullptr);
         gst_object_unref(gsink);
     }
 
@@ -1344,7 +1370,7 @@ void Player::buildPipeline()
     // Start through a scene graph update, so the GL context that is active when
     // the pipeline starts is the PlayerWindow's (otherwise qml6glsink draws in
     // whichever context rendered last).
-    QQuickWindow *win = m_item->window();
+    QQuickWindow *win = m_item ? m_item->window() : nullptr;
     gst_element_set_state(m_pipeline, GST_STATE_READY);
 
     if (win) {

@@ -1,5 +1,7 @@
 import QtQuick
 import QtQuick.Controls
+import QtWayland.Compositor
+import QtWayland.Compositor.XdgShell
 import Ytgst
 import org.freedesktop.gstreamer.Qt6GLVideoItem 1.0
 
@@ -120,10 +122,69 @@ Window {
         }
     }
 
+    // === The picture =====================================================
+    // YtGst runs a Wayland compositor of its own so that the video sink can be
+    // waylandsink. That sink hands the decoded frames straight to the
+    // compositor (dmabuf, no copy through system memory), exactly as it does
+    // for Weston, and the compositor draws the resulting surface inside this
+    // window. The controls below are ordinary QML items on top of it.
+    //
+    // A fixed socket name is enough: one YtGst runs at a time, and the socket
+    // is removed again when the compositor goes down.
+    ListModel { id: videoSurfaces }
+
+    WaylandCompositor {
+        id: videoCompositor
+        socketName: "ytgst-video"
+
+        XdgShell {
+            onToplevelCreated: (toplevel, xdgSurface) => {
+                videoSurfaces.append({ shellSurface: xdgSurface });
+            }
+        }
+    }
+
+    WaylandOutput {
+        compositor: videoCompositor
+        sizeFollowsWindow: true
+        window: playerWindow
+    }
+
+    // Fallback picture: only drawn when the qml6glsink chain runs (see
+    // Player.sinkDisplay and buildPipeline()); with waylandsink the frames
+    // arrive as a surface in videoViewport below instead.
     GstGLQt6VideoItem {
         id: videoSurface
         anchors.fill: parent
-        visible: true
+        visible: videoSurfaces.count === 0
+    }
+
+    // The waylandsink surface, scaled to fill the window. The surface carries
+    // the video at its own size (1920x1080), and the item's size follows the
+    // surface, so the scale is worked out from the item's own size and stays
+    // right whatever size the window has.
+    Item {
+        id: videoViewport
+        anchors.fill: parent
+        clip: true
+
+        Repeater {
+            model: videoSurfaces
+
+            delegate: ShellSurfaceItem {
+                id: shellItem
+                shellSurface: modelData
+                focusOnClick: false
+                onSurfaceDestroyed: videoSurfaces.remove(index)
+
+                transform: Scale {
+                    origin.x: 0
+                    origin.y: 0
+                    xScale: shellItem.width > 0 ? videoViewport.width / shellItem.width : 1
+                    yScale: shellItem.height > 0 ? videoViewport.height / shellItem.height : 1
+                }
+            }
+        }
     }
 
     // Captures mouse hover over the whole window without stealing clicks.
@@ -167,6 +228,8 @@ Window {
     Player {
         id: player
         videoItem: videoSurface
+        // The compositor above is where waylandsink draws (see buildPipeline()).
+        sinkDisplay: videoCompositor.socketName
         onErrorOccurred: (message) => {
             errorLabel.text = message;
             errorClearTimer.restart();

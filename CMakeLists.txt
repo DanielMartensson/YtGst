@@ -6,7 +6,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Quick Network Widgets)
+# WaylandCompositor: the video sink is drawn inside the player window through a
+# Wayland compositor of our own (see PlayerWindow.qml), so waylandsink can be
+# used for the picture without opening a window of its own.
+find_package(Qt6 6.8 REQUIRED COMPONENTS Quick Network Widgets WaylandCompositor)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-gl-1.0)
@@ -81,7 +84,8 @@ target_sources(ytgst PRIVATE
     src/ytdlp.h
 )
 
-target_link_libraries(ytgst PRIVATE Qt6::Quick Qt6::Network Qt6::Widgets PkgConfig::GST)
+target_link_libraries(ytgst PRIVATE Qt6::Quick Qt6::Network Qt6::Widgets
+    Qt6::WaylandCompositor PkgConfig::GST)
 
 # Pass the configurable values in as compile flags (-D...).
 target_compile_definitions(ytgst PRIVATE
