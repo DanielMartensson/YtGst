@@ -1,5 +1,7 @@
 #include <QApplication>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
