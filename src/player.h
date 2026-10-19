@@ -5,7 +5,9 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QProcess>
+#include <QRect>
 #include <QString>
 #include <QVariantList>
 #include <QtQml/qqml.h>
@@ -15,6 +17,7 @@
 #include <gst/gst.h>
 
 class QTimer;
+class QWindow;
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -83,6 +86,14 @@ public:
     Q_INVOKABLE void toggleFullscreen();
     Q_INVOKABLE void download();
 
+    // The picture's own window (VideoWindow.qml) and the part of it the picture
+    // fills. Given those, the sink draws into a Wayland sub-surface of the
+    // window instead of opening a window of its own, so the frame around the
+    // picture - and with it dragging, resizing and fullscreen - belongs to the
+    // application (Weston draws no window frames itself).
+    Q_INVOKABLE void setVideoWindow(QObject *window);
+    Q_INVOKABLE void setVideoRect(int x, int y, int width, int height);
+
 signals:
     void playingChanged();
     void loadingChanged();
@@ -120,6 +131,8 @@ private:
     void attachSinkProbe(GstElement *videoBin);
     void applySeek(qint64 positionMs, double rate);
     void applyVolume();
+    void applyVideoRect();
+    void embedVideoIntoWindow();
     void updateProgress();
     static void onBusMessage(GstBus *bus, GstMessage *msg, gpointer userData);
 
@@ -128,6 +141,15 @@ private:
     // fullscreen state can be driven at runtime through its "fullscreen"
     // property; cleared when the pipeline is disposed.
     GstElement *m_videoSink = nullptr;
+    // The window the picture is drawn into (VideoWindow.qml) and the rectangle
+    // inside it that the picture fills - the picture starts below the window's
+    // own title bar. Both come from QML.
+    QPointer<QWindow> m_videoWindow;
+    QRect m_videoRect;
+    // True while the sink draws into m_videoWindow. The sink's own "fullscreen"
+    // property must not be touched then: it would act on the toplevel the sink
+    // never created.
+    bool m_embeddedVideo = false;
     // The video the current/last pipeline was built for, so the play button can
     // start playback again after it has been stopped (EOS, error, or the video
     // window being closed).

@@ -6,9 +6,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-# The video is drawn by waylandsink in its own Weston window; the control
-# panel is a separate plain window (see PlayerWindow.qml). The scene graph
-# renders with the RHI chosen in main.cpp (Vulkan by default, OpenGL fallback).
+# The picture is drawn by waylandsink into the window defined in
+# qml/VideoWindow.qml, which carries the frame around it; the control panel is a
+# second, transparent window (qml/PlayerWindow.qml). The scene graph renders with
+# the RHI chosen in main.cpp (Vulkan by default, OpenGL fallback).
 find_package(Qt6 6.8 REQUIRED COMPONENTS Quick Network Widgets)
 
 find_package(PkgConfig REQUIRED)
@@ -46,8 +47,9 @@ message(STATUS "Audio decoder: ${YTGST_AUDIO_DECODER}")
 set(YTGST_AUDIO_SINK "" CACHE STRING "GStreamer audio sink (empty = auto)")
 message(STATUS "Audio sink: ${YTGST_AUDIO_SINK}")
 
-# Video sink chain. Empty = waylandsink name=gsink (Weston window).
-# Example: v4l2slh264dec ! glupload ! glcolorconvert ! capsfilter ! qml6glsink.
+# Video sink chain. Empty = waylandsink name=gsink, which draws into the
+# application's own window when it can and opens one of its own otherwise.
+# Example: waylandsink.
 set(YTGST_VIDEO_SINK "" CACHE STRING "GStreamer video sink chain (empty = waylandsink)")
 message(STATUS "Video sink: ${YTGST_VIDEO_SINK}")
 
@@ -67,6 +69,7 @@ qt_add_qml_module(ytgst
     QML_FILES
         qml/Main.qml
         qml/PlayerWindow.qml
+        qml/VideoWindow.qml
         qml/SearchBar.qml
         qml/VideoCard.qml
         qml/Spinner.qml
@@ -85,6 +88,26 @@ target_sources(ytgst PRIVATE
 
 target_link_libraries(ytgst PRIVATE Qt6::Quick Qt6::Network Qt6::Widgets
     PkgConfig::GST)
+
+# --- Picture window embedding --------------------------------------------
+# The picture's window is the application's own (VideoWindow.qml) and the sink
+# draws the picture into a Wayland sub-surface of it; that is what gives the
+# picture a frame, since the platform draws none (see
+# Player::embedVideoIntoWindow()). Doing so needs waylandsink's Wayland helper
+# library and the private headers of Qt's Wayland platform plugin. Without them
+# the player still builds and runs - the sink then opens a window of its own,
+# which can neither be dragged nor resized.
+find_package(Qt6 QUIET COMPONENTS WaylandClient)
+pkg_check_modules(GST_WAYLAND QUIET IMPORTED_TARGET gstreamer-wayland-1.0)
+if(TARGET Qt6::WaylandClientPrivate AND GST_WAYLAND_FOUND)
+    target_compile_definitions(ytgst PRIVATE YTGST_WAYLAND_EMBED)
+    target_link_libraries(ytgst PRIVATE Qt6::WaylandClient Qt6::WaylandClientPrivate
+        PkgConfig::GST_WAYLAND)
+    message(STATUS "picture window embedding: enabled")
+else()
+    message(STATUS "picture window embedding: disabled "
+        "(need Qt6::WaylandClientPrivate and gstreamer-wayland-1.0)")
+endif()
 
 # Pass the configurable values in as compile flags (-D...).
 target_compile_definitions(ytgst PRIVATE

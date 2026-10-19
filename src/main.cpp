@@ -168,29 +168,29 @@ static void preferVulkanCapablePlatform()
 }
 
 // Picks the scene graph's RHI graphics API before the application is
-// constructed. The video is drawn by waylandsink in its own Weston window, so
-// the RHI only affects the control panel's scene graph - it does not touch the
+// constructed. The picture is drawn by waylandsink into a Wayland sub-surface,
+// so the RHI only affects the window content around it - it does not touch the
 // decoding or the picture itself.
 //
-// Measured on the STM32MP25 board (libvulkan_VSI 1.3.3): a Qt Quick window on
-// Vulkan freezes the whole UI as soon as a window is exposed or restacked. The
-// render thread blocks inside the driver while it dispatches Wayland events,
-// the GUI thread then waits for the render thread
-// (processExposeEvent -> QQuickWindow -> QWaitCondition::wait), and the same
-// code path has been seen to segfault. waylandsink keeps feeding frames while
-// that happens, so the picture is fine but every control is dead. OpenGL
-// (GCNANO EGL) does not do this and holds ~58-60 fps. Vulkan therefore stays
-// available, but opt-in, through YTGST_RENDERER=vulkan.
+// Vulkan is the default, like the NanoBrowser/OpenNOW applications on this
+// board: the VeriSilicon driver implements Vulkan 1.3 and Qt Quick's Vulkan
+// scene graph renders and submits frames on it.
+//
+// An earlier version of this player had to stay on OpenGL: with the picture
+// inside the scene graph (qml6glsink/GstGL) a Vulkan window froze the UI as soon
+// as it was exposed or restacked - the Qt render thread blocked in the driver
+// while dispatching Wayland events and the GUI thread waited for it. That was a
+// GstGL/interop problem, and it went away with the move to waylandsink, which
+// never enters the scene graph. If a system still turns out to be unable to run
+// the panel on Vulkan, YTGST_RENDERER=opengl forces the old behaviour.
 static void pickGraphicsApi()
 {
     const QByteArray forced = rendererFromEnv();
 
-    if (forced != "vulkan") {
+    if (forced == "opengl") {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
         g_graphicsApi = QStringLiteral("OpenGL");
-        g_graphicsReason = forced == "opengl"
-            ? QStringLiteral("forced via YTGST_RENDERER")
-            : QStringLiteral("the VeriSilicon Vulkan driver freezes the GUI thread");
+        g_graphicsReason = QStringLiteral("forced via YTGST_RENDERER");
         qInfo("YtGst: using OpenGL renderer (%s)", g_graphicsReason.toUtf8().constData());
         return;
     }

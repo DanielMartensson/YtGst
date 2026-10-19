@@ -21,6 +21,7 @@
 #include <QUrl>
 #include <QVariant>
 #include <QVariantMap>
+#include <QWindow>
 
 #include <algorithm>
 #include <cstdio>
@@ -29,6 +30,23 @@
 #include <unistd.h>
 
 #include <gst/gst.h>
+#include <gst/video/videooverlay.h>
+
+#if defined(YTGST_WAYLAND_EMBED)
+// The GStreamer Wayland library is unstable API by declaration - but it is
+// exactly what waylandsink uses internally, and the display-handle context it
+// provides is the supported way to hand a sink an existing connection.
+#define GST_USE_UNSTABLE_API
+
+#include <gst/wayland/wayland.h>
+
+// The picture's window is a Qt Quick window, so the sink has to render into a
+// sub-surface of a surface Qt owns. Both the window's wl_surface and the Wayland
+// connection behind it come from Qt's Wayland platform plugin, which only
+// exposes them through these private headers.
+#include <QtWaylandClient/private/qwaylanddisplay_p.h>
+#include <QtWaylandClient/private/qwaylandwindow_p.h>
+#endif
 
 // Short code -> display name for the most common subtitle languages.
 static QString languageName(const QString &code)
@@ -865,13 +883,107 @@ void Player::toggleMute()
 
 void Player::toggleFullscreen()
 {
-    // waylandsink implements the "fullscreen" property (it asks the compositor
-    // to make its own toplevel window fullscreen), so the video window is driven
-    // from here even though the picture never goes through Qt.
+    // The picture's window is the application's own (VideoWindow.qml), so
+    // fullscreen is a change of that window's visibility state - the QML side
+    // reacts to fullscreenChanged(). Only when the sink had to open a window of
+    // its own (no embedding) is it driven through the sink's "fullscreen"
+    // property.
     m_fullscreen = !m_fullscreen;
-    if (m_videoSink)
+    if (m_videoSink && !m_embeddedVideo)
         g_object_set(m_videoSink, "fullscreen", m_fullscreen, nullptr);
     emit fullscreenChanged();
+}
+
+#if defined(YTGST_WAYLAND_EMBED)
+// The wl_surface of a Qt window and the Wayland connection it belongs to.
+static struct wl_surface *waylandSurfaceOf(QWindow *window, struct wl_display **display)
+{
+    if (!window)
+        return nullptr;
+    if (!window->handle())
+        window->create();
+    if (!window->handle())
+        return nullptr;
+    auto *waylandWindow = dynamic_cast<QtWaylandClient::QWaylandWindow *>(window->handle());
+    if (!waylandWindow)
+        return nullptr;
+    if (display)
+        *display = waylandWindow->display()->wl_display();
+    return waylandWindow->wlSurface();
+}
+#endif
+
+void Player::setVideoWindow(QObject *window)
+{
+    m_videoWindow = qobject_cast<QWindow *>(window);
+}
+
+void Player::setVideoRect(int x, int y, int width, int height)
+{
+    m_videoRect = QRect(x, y, width, height);
+    applyVideoRect();
+}
+
+// Keeps the sink's render rectangle in step with the window: the picture fills
+// the frame's inside, which moves when the window is resized or goes
+// fullscreen.
+void Player::applyVideoRect()
+{
+    if (!m_videoSink || !m_videoRect.isValid())
+        return;
+    if (!GST_IS_VIDEO_OVERLAY(m_videoSink))
+        return;
+    GstVideoOverlay *overlay = GST_VIDEO_OVERLAY(m_videoSink);
+    gst_video_overlay_set_render_rectangle(overlay, m_videoRect.x(), m_videoRect.y(),
+                                           m_videoRect.width(), m_videoRect.height());
+    // The sink stops drawing while a resize is pending, so ask it to draw the
+    // last frame again in the new size.
+    gst_video_overlay_expose(overlay);
+}
+
+// Hands the picture's window to the sink so it renders into a sub-surface of
+// it instead of opening a toplevel of its own. The application then owns the
+// toplevel, which is what gives the picture a frame: Weston 13's desktop-shell
+// draws no decorations at all, so the sink's own window could neither be
+// dragged nor resized.
+void Player::embedVideoIntoWindow()
+{
+    m_embeddedVideo = false;
+    if (!m_videoSink || !m_videoWindow || !m_videoRect.isValid())
+        return;
+
+#if defined(YTGST_WAYLAND_EMBED)
+    if (!GST_IS_VIDEO_OVERLAY(m_videoSink)) {
+        qWarning("YtGst: this video sink has no GstVideoOverlay interface - "
+                 "it draws in a window of its own");
+        return;
+    }
+
+    struct wl_display *display = nullptr;
+    struct wl_surface *surface = waylandSurfaceOf(m_videoWindow.data(), &display);
+    if (!surface || !display) {
+        qWarning("YtGst: the video window has no Wayland surface yet - "
+                 "waylandsink draws in a window of its own");
+        return;
+    }
+
+    // The display has to be in place first: without it the sink cannot accept
+    // the surface ("application did not provide a wayland display handle") and
+    // would connect on its own instead. Both go in before the sink renders its
+    // first frame, because that is when it creates its window.
+    GstContext *context = gst_wl_display_handle_context_new(display);
+    gst_element_set_context(m_videoSink, context);
+    gst_context_unref(context);
+
+    gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(m_videoSink),
+                                        (guintptr)surface);
+    m_embeddedVideo = true;
+    applyVideoRect();
+    qInfo("YtGst: picture embedded in the application's own window");
+#else
+    qWarning("YtGst: built without Wayland window embedding - waylandsink "
+             "draws in a window of its own");
+#endif
 }
 
 void Player::applyVolume()
@@ -1224,12 +1336,14 @@ void Player::buildPipeline()
     // the sink). The dynamic pads are linked in onHlsdemuxPadAdded() and
     // onDemuxPadAdded().
     //
-    // The sink is waylandsink (non-fullscreen): it opens its own Weston window
-    // - movable and resizable via the decorations - and hands the decoder's
-    // dmabuf straight to the session display (WAYLAND_DISPLAY / XDG_RUNTIME_DIR
-    // inherited from the launcher). The control panel is a separate window
-    // (PlayerWindow.qml); both windows belong to this process, so closing the
-    // panel stops the pipeline and takes the video window with it.
+    // The sink is waylandsink: it hands the decoder's dmabuf straight to the
+    // session display (WAYLAND_DISPLAY / XDG_RUNTIME_DIR inherited from the
+    // launcher). It draws into the picture's own window when there is one (see
+    // embedVideoIntoWindow() below and VideoWindow.qml), so the picture gets a
+    // frame the platform does not provide; otherwise it opens a window of its
+    // own. The control panel is a third, transparent window (PlayerWindow.qml).
+    // All of them belong to this process, so closing the panel stops the
+    // pipeline and takes the picture's window with it.
     QString videoSinkDescription = QStringLiteral(YTGST_VIDEO_SINK);
     if (videoSinkDescription.isEmpty())
         videoSinkDescription = QStringLiteral("waylandsink name=gsink");
@@ -1305,11 +1419,12 @@ void Player::buildPipeline()
     gst_bin_add(GST_BIN(vplay), vdecoder);
     gst_bin_add(GST_BIN(vplay), vsink);
 
-    // Remember the video sink so toggleFullscreen() can drive its "fullscreen"
-    // property. A reference is held; disposePipeline() drops it. The bin is
-    // searched (gst_bin_get_by_name only sees direct children) and the element
-    // that actually exposes "fullscreen" is taken, so an overridden
-    // YTGST_VIDEO_SINK chain still works.
+    // Remember the video sink so the fullscreen state can be driven at runtime
+    // through its "fullscreen" property (when it draws in a window of its own).
+    // A reference is held; disposePipeline() drops it. The bin is searched
+    // (gst_bin_get_by_name only sees direct children) and the element that
+    // actually exposes "fullscreen" is taken, so an overridden YTGST_VIDEO_SINK
+    // chain still works.
     if (m_videoSink) {
         gst_object_unref(m_videoSink);
         m_videoSink = nullptr;
@@ -1328,7 +1443,12 @@ void Player::buildPipeline()
     g_value_unset(&sinkItem);
     gst_iterator_free(sinkIt);
 
-    if (m_videoSink && m_fullscreen)
+    // The picture goes into the application's own window when there is one: the
+    // window then owns the toplevel, so it has a frame, can be dragged and
+    // resized, and fullscreen is a change of the window state. Only when the
+    // sink had to open a window of its own is its "fullscreen" property used.
+    embedVideoIntoWindow();
+    if (m_videoSink && m_fullscreen && !m_embeddedVideo)
         g_object_set(m_videoSink, "fullscreen", TRUE, nullptr);
 
     // h264parse, the decoder and the sink have static pads and are linked right
@@ -1473,9 +1593,16 @@ void Player::disposePipeline()
     if (m_videoSink) {
         gst_object_unref(m_videoSink);
         m_videoSink = nullptr;
+        m_embeddedVideo = false;
     }
     if (m_pipeline) {
         gst_element_set_state(m_pipeline, GST_STATE_NULL);
+        // Wait for the sink to let go of the picture before anything may happen
+        // to the window: the picture is drawn into sub-surfaces of the window's
+        // Wayland surface, and Qt is free to destroy that surface the moment the
+        // window is hidden. A sink still rendering into it - or into
+        // sub-surfaces the compositor took away with it - is a protocol error.
+        gst_element_get_state(m_pipeline, nullptr, nullptr, GST_SECOND);
         gst_bus_remove_signal_watch(gst_element_get_bus(m_pipeline));
         gst_object_unref(m_pipeline);
         m_pipeline = nullptr;

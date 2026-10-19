@@ -10,9 +10,10 @@ Window {
     minimumWidth: 560
     minimumHeight: 140
     visible: false
-    // The video has a window of its own (waylandsink draws it), so the panel is
-    // only the controls: a frameless, see-through strip that can sit on top of
-    // the picture and is moved by dragging its empty areas.
+    // The picture has a window of its own (VideoWindow.qml, filled by
+    // waylandsink), so the panel is only the controls: a frameless, see-through
+    // strip that can sit on top of the picture and is moved by dragging its
+    // empty areas.
     color: "transparent"
     flags: Qt.FramelessWindowHint
     title: videoTitle.length > 0 ? videoTitle : qsTr("YtGst Player")
@@ -127,6 +128,29 @@ Window {
                 raiseHideTimer.restart();
             else
                 playerWindow.revealChrome();  // show the play button again
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The picture's own window
+    //
+    // It has to exist - and be mapped, so that it has a Wayland surface -
+    // before playback starts: the sink draws the picture into a sub-surface of
+    // that surface (Player::embedVideoIntoWindow()). The frame around the
+    // picture is this window's, which is what makes the picture movable.
+    // ------------------------------------------------------------------
+    VideoWindow {
+        id: videoWindow
+        playback: player
+        videoTitle: playerWindow.videoTitle
+        fullscreen: player.fullscreen
+
+        onCloseRequested: {
+            // Closing the picture stops the playback and leaves the panel, so
+            // the play button can start the same video again.
+            player.stop();
+            videoWindow.visible = false;
+            playerWindow.revealChrome();
         }
     }
 
@@ -500,9 +524,9 @@ Window {
         }
     }
 
-    // Fullscreen. waylandsink draws the picture in its own Weston window, so the
-    // button drives waylandsink's "fullscreen" property through the player
-    // rather than the panel window.
+    // Fullscreen. The picture's window is the application's own
+    // (VideoWindow.qml), so this only flips the player's fullscreen state; the
+    // window itself changes its visibility state in reaction.
     Rectangle {
         id: fullscreenButton
         width: 40
@@ -649,7 +673,8 @@ Window {
         }
     }
 
-    // Volume (clicking the icon shows a vertical slider above)
+    // Volume (clicking the icon shows a horizontal slider reaching leftwards,
+    // side by side with the icon, quiet on the left)
     Item {
         id: volumeControl
         property bool expanded: false
@@ -665,22 +690,22 @@ Window {
         Rectangle {
             id: volumePanel
             visible: volumeControl.expanded
-            width: 44
-            height: 140
+            width: 150
+            height: 44
             radius: 22
             color: "#cc000000"
             border.color: "#33ffffff"
             border.width: 1
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: volumeButton.top
-            anchors.bottomMargin: 8
+            anchors.verticalCenter: volumeButton.verticalCenter
+            anchors.right: volumeButton.left
+            anchors.rightMargin: 8
 
             Slider {
                 id: volumeSlider
-                orientation: Qt.Vertical
+                orientation: Qt.Horizontal
                 anchors.centerIn: parent
-                width: 24
-                height: parent.height - 28
+                width: parent.width - 28
+                height: 24
                 from: 0.0
                 to: 1.0
                 value: player.volume
@@ -695,25 +720,26 @@ Window {
                 }
 
                 background: Rectangle {
-                    x: volumeSlider.leftPadding + volumeSlider.availableWidth / 2 - width / 2
-                    y: volumeSlider.topPadding
-                    width: 4
-                    height: volumeSlider.availableHeight
+                    x: volumeSlider.leftPadding
+                    y: volumeSlider.topPadding + volumeSlider.availableHeight / 2 - height / 2
+                    width: volumeSlider.availableWidth
+                    height: 4
                     radius: 2
                     color: "#55ffffff"
 
                     Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
                         anchors.bottom: parent.bottom
-                        width: parent.width
-                        height: volumeSlider.position * parent.height
+                        width: volumeSlider.position * parent.width
                         radius: 2
                         color: "#ff0000"
                     }
                 }
 
                 handle: Rectangle {
-                    x: volumeSlider.leftPadding + volumeSlider.availableWidth / 2 - width / 2
-                    y: volumeSlider.topPadding + volumeSlider.visualPosition * (volumeSlider.availableHeight - height)
+                    x: volumeSlider.leftPadding + volumeSlider.visualPosition * (volumeSlider.availableWidth - width)
+                    y: volumeSlider.topPadding + volumeSlider.availableHeight / 2 - height / 2
                     width: 16
                     height: 16
                     radius: 8
@@ -840,11 +866,20 @@ Window {
     Timer {
         id: playTimer
         interval: 300
-        onTriggered: player.play(videoId)
+        onTriggered: {
+            // The picture's window first: the pipeline is built for its Wayland
+            // surface, and showing it here is what creates that surface. It also
+            // goes on top of the panel, so the panel is put back up.
+            videoWindow.visible = true;
+            videoWindow.syncVisibility();
+            raiseHideTimer.restart();
+            player.play(videoId);
+        }
     }
 
     onClosing: {
         player.stop();
+        videoWindow.visible = false;
         videoId = "";
         if (standalone)
             Qt.quit();
@@ -854,33 +889,43 @@ Window {
 
     // ------------------------------------------------------------------
     // Shortcuts
+    //
+    // Application-wide on purpose: the picture has a window of its own now, and
+    // a key pressed while it is focused has to reach the player too.
     // ------------------------------------------------------------------
     Shortcut {
         sequence: "M"
+        context: Qt.ApplicationShortcut
         onActivated: player.toggleMute()
     }
     Shortcut {
         sequence: "Up"
+        context: Qt.ApplicationShortcut
         onActivated: player.setVolume(Math.min(1.0, player.volume + 0.05))
     }
     Shortcut {
         sequence: "Down"
+        context: Qt.ApplicationShortcut
         onActivated: player.setVolume(Math.max(0.0, player.volume - 0.05))
     }
     Shortcut {
         sequence: "D"
+        context: Qt.ApplicationShortcut
         onActivated: player.download()
     }
     Shortcut {
         sequence: "F"
+        context: Qt.ApplicationShortcut
         onActivated: player.toggleFullscreen()
     }
     Shortcut {
         sequence: "F11"
+        context: Qt.ApplicationShortcut
         onActivated: player.toggleFullscreen()
     }
     Shortcut {
         sequence: "Esc"
+        context: Qt.ApplicationShortcut
         onActivated: playerWindow.close()
     }
 }
