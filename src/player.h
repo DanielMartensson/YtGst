@@ -42,6 +42,7 @@ class Player : public QObject
     Q_PROPERTY(QString subtitleText READ subtitleText NOTIFY subtitleTextChanged)
     Q_PROPERTY(double volume READ volume NOTIFY volumeChanged)
     Q_PROPERTY(bool muted READ muted NOTIFY mutedChanged)
+    Q_PROPERTY(bool fullscreen READ fullscreen NOTIFY fullscreenChanged)
     Q_PROPERTY(bool downloading READ downloading NOTIFY downloadingChanged)
     Q_PROPERTY(double downloadProgress READ downloadProgress NOTIFY downloadProgressChanged)
     Q_PROPERTY(QString downloadStatus READ downloadStatus NOTIFY downloadStatusChanged)
@@ -65,6 +66,7 @@ public:
     QString subtitleText() const { return m_subtitleText; }
     double volume() const { return m_volume; }
     bool muted() const { return m_muted; }
+    bool fullscreen() const { return m_fullscreen; }
     bool downloading() const { return m_downloading; }
     double downloadProgress() const { return m_downloadProgress; }
     QString downloadStatus() const { return m_downloadStatus; }
@@ -78,6 +80,7 @@ public:
     Q_INVOKABLE void setSubtitleLanguage(const QString &language);
     Q_INVOKABLE void setVolume(double volume);
     Q_INVOKABLE void toggleMute();
+    Q_INVOKABLE void toggleFullscreen();
     Q_INVOKABLE void download();
 
 signals:
@@ -94,6 +97,7 @@ signals:
     void subtitleTextChanged();
     void volumeChanged();
     void mutedChanged();
+    void fullscreenChanged();
     void downloadingChanged();
     void downloadProgressChanged();
     void downloadStatusChanged();
@@ -120,6 +124,14 @@ private:
     static void onBusMessage(GstBus *bus, GstMessage *msg, gpointer userData);
 
     GstElement *m_pipeline = nullptr;
+    // The waylandsink of the built pipeline (owned by m_pipeline). Kept so the
+    // fullscreen state can be driven at runtime through its "fullscreen"
+    // property; cleared when the pipeline is disposed.
+    GstElement *m_videoSink = nullptr;
+    // The video the current/last pipeline was built for, so the play button can
+    // start playback again after it has been stopped (EOS, error, or the video
+    // window being closed).
+    QString m_videoId;
     // The audio playbin inside m_pipeline (owned by it). Kept so a failure that
     // comes from the audio side can be told apart from one that should stop
     // playback.
@@ -160,6 +172,7 @@ private:
     int m_activeCue = -1;
     double m_volume = 1.0;
     bool m_muted = false;
+    bool m_fullscreen = false;
     QProcess m_download;
     bool m_downloading = false;
     bool m_downloadCancelled = false;

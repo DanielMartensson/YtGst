@@ -401,6 +401,7 @@ void Player::play(const QString &videoId)
     if (videoId.isEmpty())
         return;
 
+    m_videoId = videoId;
     disposePipeline();
 
     if (!qFuzzyCompare(m_rate, 1.0)) {
@@ -776,8 +777,15 @@ void Player::stop()
 
 void Player::togglePlayPause()
 {
-    if (!m_pipeline)
+    // A missing pipeline means playback was stopped (EOS, a stream error, or the
+    // stop button). The button then acts as "play again" and rebuilds the
+    // pipeline for the video that was loaded, which is also what brings the
+    // waylandsink window back if it was closed.
+    if (!m_pipeline) {
+        if (!m_videoId.isEmpty())
+            play(m_videoId);
         return;
+    }
     const GstState state = GST_STATE(m_pipeline);
     gst_element_set_state(m_pipeline,
                           state == GST_STATE_PLAYING ? GST_STATE_PAUSED : GST_STATE_PLAYING);
@@ -853,6 +861,17 @@ void Player::toggleMute()
     m_muted = !m_muted;
     emit mutedChanged();
     applyVolume();
+}
+
+void Player::toggleFullscreen()
+{
+    // waylandsink implements the "fullscreen" property (it asks the compositor
+    // to make its own toplevel window fullscreen), so the video window is driven
+    // from here even though the picture never goes through Qt.
+    m_fullscreen = !m_fullscreen;
+    if (m_videoSink)
+        g_object_set(m_videoSink, "fullscreen", m_fullscreen, nullptr);
+    emit fullscreenChanged();
 }
 
 void Player::applyVolume()
@@ -1247,10 +1266,37 @@ void Player::buildPipeline()
     gst_bin_add(GST_BIN(vplay), vdecoder);
     gst_bin_add(GST_BIN(vplay), vsink);
 
+    // Remember the video sink so toggleFullscreen() can drive its "fullscreen"
+    // property. A reference is held; disposePipeline() drops it. The bin is
+    // searched (gst_bin_get_by_name only sees direct children) and the element
+    // that actually exposes "fullscreen" is taken, so an overridden
+    // YTGST_VIDEO_SINK chain still works.
+    if (m_videoSink) {
+        gst_object_unref(m_videoSink);
+        m_videoSink = nullptr;
+    }
+    GstIterator *sinkIt = gst_bin_iterate_sinks(GST_BIN(vsink));
+    GValue sinkItem = G_VALUE_INIT;
+    while (gst_iterator_next(sinkIt, &sinkItem) == GST_ITERATOR_OK) {
+        GstElement *candidate = GST_ELEMENT(g_value_get_object(&sinkItem));
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(candidate), "fullscreen")) {
+            m_videoSink = GST_ELEMENT(gst_object_ref(candidate));
+            g_value_reset(&sinkItem);
+            break;
+        }
+        g_value_reset(&sinkItem);
+    }
+    g_value_unset(&sinkItem);
+    gst_iterator_free(sinkIt);
+
+    if (m_videoSink && m_fullscreen)
+        g_object_set(m_videoSink, "fullscreen", TRUE, nullptr);
+
     // h264parse, the decoder and the sink have static pads and are linked right
     // away; the demuxers are linked when they announce their pads.
     bool linked = gst_element_link(vsrc, vdemux)
         && gst_element_link(vqueue, vparse)
+        && gst_element_link(vparse, vdecoder)
         && gst_element_link(vdecoder, vsink);
     if (vtsdemux) {
         g_signal_connect(vdemux, "pad-added", G_CALLBACK(onHlsdemuxPadAdded), vtsdemux);
@@ -1358,6 +1404,10 @@ void Player::disposePipeline()
 {
     if (m_tick)
         m_tick->stop();
+    if (m_videoSink) {
+        gst_object_unref(m_videoSink);
+        m_videoSink = nullptr;
+    }
     if (m_pipeline) {
         gst_element_set_state(m_pipeline, GST_STATE_NULL);
         gst_bus_remove_signal_watch(gst_element_get_bus(m_pipeline));

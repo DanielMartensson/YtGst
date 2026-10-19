@@ -5,17 +5,28 @@ import Ytgst
 Window {
     id: playerWindow
 
-    width: 800
+    width: 720
     height: 140
-    minimumWidth: 640
+    minimumWidth: 560
     minimumHeight: 140
     visible: false
-    color: "#0b0b0c"
+    // The video has a window of its own (waylandsink draws it), so the panel is
+    // only the controls: a frameless, see-through strip that can sit on top of
+    // the picture and is moved by dragging its empty areas.
+    color: "transparent"
+    flags: Qt.FramelessWindowHint
     title: videoTitle.length > 0 ? videoTitle : qsTr("YtGst Player")
 
     property string videoId: ""
     property string videoTitle: ""
     property bool standalone: false
+
+    // After this many milliseconds without the pointer over the panel the
+    // controls fade away; they come back the moment the pointer is over the
+    // panel again. The window itself stays mapped so the pointer still lands on
+    // it while the controls are invisible.
+    property int autoHideInterval: 5000
+    property bool chromeVisible: true
 
     // ------------------------------------------------------------------
     // Helpers
@@ -61,6 +72,48 @@ Window {
     }
 
     // ------------------------------------------------------------------
+    // Fade the controls out when the pointer has been away for a while.
+    // contentItem is the root item of the window's own content (the panel
+    // background and every control), so animating its opacity fades the whole
+    // panel without unmapping the window.
+    // ------------------------------------------------------------------
+    NumberAnimation {
+        id: chromeFade
+        target: playerWindow.contentItem
+        property: "opacity"
+        duration: 220
+        easing.type: Easing.InOutQuad
+    }
+
+    Timer {
+        id: chromeHideTimer
+        interval: playerWindow.autoHideInterval
+        onTriggered: playerWindow.hideChrome()
+    }
+
+    function revealChrome() {
+        chromeHideTimer.stop();
+        if (!chromeVisible) {
+            chromeVisible = true;
+            chromeFade.to = 1.0;
+            chromeFade.start();
+        }
+    }
+
+    function hideChrome() {
+        if (!chromeVisible)
+            return;
+        chromeVisible = false;
+        chromeFade.to = 0.0;
+        chromeFade.start();
+    }
+
+    function scheduleHide() {
+        if (chromeVisible)
+            chromeHideTimer.restart();
+    }
+
+    // ------------------------------------------------------------------
     // Player
     // ------------------------------------------------------------------
     Player {
@@ -72,7 +125,51 @@ Window {
         onPlayingChanged: {
             if (playing)
                 raiseHideTimer.restart();
+            else
+                playerWindow.revealChrome();  // show the play button again
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Panel background, drag handle and hover tracker.
+    //
+    // dragArea sits below the controls (z 1), so dragging the empty parts of the
+    // panel asks the compositor to move the window; hoverArea sits above
+    // everything (z 20) and accepts hover only, so clicks pass straight through
+    // to the controls while the fade timer still sees the pointer.
+    // ------------------------------------------------------------------
+    Rectangle {
+        id: panelBackground
+        anchors.fill: parent
+        anchors.margins: 2
+        radius: 12
+        color: "#a60b0b0c"
+        border.color: "#2effffff"
+        border.width: 1
+        z: 0
+    }
+
+    MouseArea {
+        id: dragArea
+        anchors.fill: parent
+        z: 1
+        acceptedButtons: Qt.LeftButton
+        onPressed: playerWindow.startSystemMove()
+    }
+
+    MouseArea {
+        id: hoverArea
+        anchors.fill: parent
+        z: 20
+        hoverEnabled: true
+        acceptedButtons: Qt.NoButton
+        onContainsMouseChanged: {
+            if (containsMouse)
+                playerWindow.revealChrome();
+            else
+                playerWindow.scheduleHide();
+        }
+        onPositionChanged: playerWindow.revealChrome()
     }
 
     // ------------------------------------------------------------------
@@ -403,17 +500,17 @@ Window {
         }
     }
 
-    // Fullscreen. The video lives in its own Weston window and waylandsink's
-    // fullscreen property crashes Weston 13.0.1, so this is a no-op; the user
-    // maximises the video window via its own decorations.
+    // Fullscreen. waylandsink draws the picture in its own Weston window, so the
+    // button drives waylandsink's "fullscreen" property through the player
+    // rather than the panel window.
     Rectangle {
         id: fullscreenButton
         width: 40
         height: 40
         radius: 20
-        color: "#b3000000"
-        border.color: "#33ffffff"
-        border.width: 1
+        color: fullscreenButtonMouse.pressed ? "#e6000000" : "#b3000000"
+        border.color: player.fullscreen ? "#ffffff" : "#33ffffff"
+        border.width: player.fullscreen ? 2 : 1
         z: 3
         anchors.top: parent.top
         anchors.left: subtitleButton.right
@@ -434,10 +531,22 @@ Window {
                 var s = 5;
                 var w = width;
                 var h = height;
-                ctx.beginPath(); ctx.moveTo(m, m + s); ctx.lineTo(m, m); ctx.lineTo(m + s, m); ctx.stroke();
-                ctx.beginPath(); ctx.moveTo(w - m - s, m); ctx.lineTo(w - m, m); ctx.lineTo(w - m, m + s); ctx.stroke();
-                ctx.beginPath(); ctx.moveTo(m, h - m - s); ctx.lineTo(m, h - m); ctx.lineTo(m + s, h - m); ctx.stroke();
-                ctx.beginPath(); ctx.moveTo(w - m - s, h - m); ctx.lineTo(w - m, h - m); ctx.lineTo(w - m, h - m - s); ctx.stroke();
+                if (player.fullscreen) {
+                    // Point the corners inwards for "leave fullscreen".
+                    ctx.beginPath(); ctx.moveTo(m, m + s); ctx.lineTo(m + s, m + s); ctx.lineTo(m + s, m); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(w - m - s, m); ctx.lineTo(w - m - s, m + s); ctx.lineTo(w - m, m + s); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(m, h - m - s); ctx.lineTo(m + s, h - m - s); ctx.lineTo(m + s, h - m); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(w - m - s, h - m); ctx.lineTo(w - m - s, h - m - s); ctx.lineTo(w - m, h - m - s); ctx.stroke();
+                } else {
+                    ctx.beginPath(); ctx.moveTo(m, m + s); ctx.lineTo(m, m); ctx.lineTo(m + s, m); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(w - m - s, m); ctx.lineTo(w - m, m); ctx.lineTo(w - m, m + s); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(m, h - m - s); ctx.lineTo(m, h - m); ctx.lineTo(m + s, h - m); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(w - m - s, h - m); ctx.lineTo(w - m, h - m); ctx.lineTo(w - m, h - m - s); ctx.stroke();
+                }
+            }
+            Connections {
+                target: player
+                function onFullscreenChanged() { fullscreenIcon.requestPaint(); }
             }
         }
 
@@ -445,9 +554,7 @@ Window {
             id: fullscreenButtonMouse
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: {
-                // No-op: waylandsink fullscreen crashes Weston 13.0.1.
-            }
+            onClicked: player.toggleFullscreen()
         }
     }
 
@@ -726,15 +833,11 @@ Window {
     }
     Shortcut {
         sequence: "F"
-        onActivated: {
-            // No-op (see fullscreenButton): waylandsink fullscreen crashes Weston.
-        }
+        onActivated: player.toggleFullscreen()
     }
     Shortcut {
         sequence: "F11"
-        onActivated: {
-            // No-op (see fullscreenButton): waylandsink fullscreen crashes Weston.
-        }
+        onActivated: player.toggleFullscreen()
     }
     Shortcut {
         sequence: "Esc"
