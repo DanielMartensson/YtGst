@@ -544,21 +544,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    // TEMPORARY test hooks, removed before the release: drive the two close
-    // paths (and the window close request) from the environment.
-    if (!engine.rootObjects().isEmpty()) {
-        QObject *root = engine.rootObjects().first();
-        auto *window = qobject_cast<QQuickWindow *>(root);
-        if (const QByteArray ms = qgetenv("YTGST_TEST_CLOSE_MS"); !ms.isEmpty() && window)
-            QTimer::singleShot(ms.toInt(), window, [window]() { window->close(); });
-        if (const QByteArray ms = qgetenv("YTGST_TEST_CLOSEPLAYER_MS"); !ms.isEmpty())
-            QTimer::singleShot(ms.toInt(), root, [root]() {
-                QMetaObject::invokeMethod(root, "closePlayer");
-            });
-        if (const QByteArray ms = qgetenv("YTGST_TEST_LAUNCHERQUIT_MS"); !ms.isEmpty())
-            QTimer::singleShot(ms.toInt(), &launcher, [&launcher]() { launcher.quit(); });
-    }
-
     // Show a warning dialog at startup if GPU acceleration is unavailable.
     if (!problems.isEmpty()) {
         QTimer::singleShot(600, &app, [problems]() {
