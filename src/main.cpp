@@ -386,9 +386,6 @@ int main(int argc, char *argv[])
     // context sharing is required for the picture.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
-    // The RHI backend must be picked before the application is constructed.
-    pickGraphicsApi();
-
     // VA-API driver: use the YTGST_VAAPI_DRIVER CMake flag if set, otherwise
     // i965 is auto-selected if present (Haswell), so vah264dec works.
 #ifdef YTGST_VAAPI_DRIVER
@@ -417,6 +414,15 @@ int main(int argc, char *argv[])
 #endif
 
     QApplication app(argc, argv);
+
+    // The RHI backend must be picked before the first QQuickWindow is created,
+    // but NOT before the application object exists: pickGraphicsApi() probes
+    // with QVulkanInstance::create(), which asks the platform plugin for
+    // createPlatformVulkanInstance() and therefore needs a QGuiApplication.
+    // Calling it earlier on this Qt build crashes inside
+    // QVulkanInstancePrivate::ensureVulkan(). NanoBrowser orders the two the
+    // same way (create the application, then pick the backend).
+    pickGraphicsApi();
 
     const QStringList problems = startupProblems();
 
