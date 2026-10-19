@@ -41,13 +41,16 @@ Window {
     property int panelSizeIndex: 0
     readonly property var panelScales: [1.0, 1.5, 2.0, 2.5]
     readonly property var panelSizeNames: ["S", "M", "L", "XL"]
-    readonly property real panelScale: panelScales[panelSizeIndex]
+    // Set by setPanelSize(); a plain property so the window size can never be
+    // computed from a half-initialised binding.
+    property real panelScale: 1.0
     readonly property string panelSizeName: panelSizeNames[panelSizeIndex]
 
     function setPanelSize(index) {
         if (index < 0 || index >= panelScales.length || index === panelSizeIndex)
             return;
         panelSizeIndex = index;
+        panelScale = panelScales[index];
     }
 
     function cyclePanelSize() {
@@ -103,7 +106,15 @@ Window {
     Timer {
         id: panelShowTimer
         interval: 0
-        onTriggered: playerWindow.visible = true
+        onTriggered: {
+            playerWindow.visible = true;
+            console.log("YtGst panel: window", playerWindow.x, playerWindow.y,
+                        playerWindow.width, playerWindow.height,
+                        "scale", playerWindow.panelScale,
+                        "root", panelRoot.width, panelRoot.height, panelRoot.scale,
+                        "chrome", chrome.width, chrome.height, chrome.opacity,
+                        "visible", playerWindow.visible);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -933,7 +944,10 @@ Window {
         height: 140
         transformOrigin: Item.TopLeft
         scale: playerWindow.panelScale
-        layer.enabled: true
+        // Only the scaled sizes go through a layer: the panel is then drawn at
+        // the final resolution and scaled 1:1, which keeps text and icons sharp.
+        // At S nothing is scaled, so the panel is drawn exactly as it always was.
+        layer.enabled: playerWindow.panelScale > 1.001
         layer.smooth: true
         layer.textureSize: Qt.size(Math.ceil(width * playerWindow.panelScale),
                                    Math.ceil(height * playerWindow.panelScale))
@@ -994,6 +1008,10 @@ Window {
         }
         chrome.parent = panelRoot;
         subtitleBox.parent = panelRoot;
+        console.log("YtGst panel built:", playerWindow.width, playerWindow.height,
+                    "root", panelRoot.width, panelRoot.height,
+                    "chrome", chrome.width, chrome.height,
+                    "items", chrome.children.length);
     }
 
     // ------------------------------------------------------------------
