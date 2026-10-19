@@ -33,10 +33,15 @@ Window {
 
     signal closeRequested()
 
-    width: 1282
-    height: 720 + titleHeight
-    minimumWidth: 482
-    minimumHeight: 272 + titleHeight
+    // Opens at the size of the videos (1282x720) but never larger than the
+    // output it lands on, so its title bar stays reachable on a smaller screen.
+    readonly property int screenWidth: videoWindow.screen ? videoWindow.screen.width : 1920
+    readonly property int screenHeight: videoWindow.screen ? videoWindow.screen.height : 1080
+
+    width: Math.min(1282, Math.round(screenWidth * 0.92))
+    height: Math.min(720 + titleHeight, Math.round(screenHeight * 0.92))
+    minimumWidth: Math.min(482, width)
+    minimumHeight: Math.min(272 + titleHeight, height)
     visible: false
     // The same colour as the search window, so the two look like one program.
     color: "#0b0b0c"

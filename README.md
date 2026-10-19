@@ -1,24 +1,27 @@
 # YtGst
 
-A lightweight YouTube player for Linux.
+A lightweight YouTube player for Linux, with a **windowed player**: the picture
+has a window of its own and the controls sit on a slidable, see-through panel on
+top of it.
 
-YtGst has two windows:
+YtGst has three windows:
 
-- **YtGst** – the search window.
-- **YtGst Player** – the player window, opened as a separate process so the
-  search window stays open.
+| Window | What it is |
+| --- | --- |
+| **YtGst** | The search window. Stays open while videos play. |
+| **YtGst Player** (picture) | The picture, in a window with a frame you can drag and resize. |
+| **The control panel** | A transparent strip with the controls, floating above the picture. |
+
+The picture and the panel belong to a player process of their own, so the search
+window is never blocked and a video can be closed without leaving the search.
 
 It is built from three parts:
 
 | Part | Role |
 | --- | --- |
-| **yt-dlp** | Fetches metadata and stream URLs from YouTube |
-| **GStreamer** | Decodes and plays audio and video |
-| **Qt 6 / QML** | Draws the interface and the video |
-
-The goal is GPU-accelerated playback: hardware video decoding (VA-API) and
-GPU rendering through OpenGL, so the CPU does as little work as possible.
-Software rendering is never the intention.
+| **yt-dlp** | Fetches metadata, stream URLs and subtitles from YouTube |
+| **GStreamer** | Decodes the picture and the sound |
+| **Qt 6 / QML** | Draws the windows, the panel and the subtitles |
 
 ## Demos
 
@@ -28,309 +31,197 @@ Software rendering is never the intention.
 
 ## How it works
 
-1. **Search.** `src/youtube.cpp` queries YouTube's internal "Innertube" API
-   with Qt Network. The JSON reply is parsed into `VideoListModel`, which QML
-   draws as video cards.
-2. **Play.** Clicking a card starts a new process with `--play <video-id>`.
-   That process runs `yt-dlp -j` to get metadata and stream URLs, then builds a
-   GStreamer pipeline from two `playbin` elements: one for video, one for audio.
-   They share a clock, which keeps audio and video in sync.
-3. **Render.** The video branch is
-
-   ```text
-   glupload → glcolorconvert → capsfilter (RGBA) → qml6glsink
-   ```
-
-   `qml6glsink` hands each frame to a `GstGLQt6VideoItem` placed inside the QML
-   player window. Qt / QML draws the controls and subtitles on top.
+1. **Search.** `src/youtube.cpp` queries YouTube's internal "Innertube" API with
+   Qt Network. The JSON reply is parsed into `VideoListModel`, which QML draws as
+   video cards.
+2. **Play.** Clicking a card starts a player process
+   (`ytgst --play <video-id> --parent-pid <our-pid>`). It runs `yt-dlp -j` to get
+   metadata, stream URLs and subtitle tracks, then builds one GStreamer pipeline
+   with a video branch and an audio branch.
+3. **Picture.** The video branch feeds `waylandsink`, which draws into the
+   application's own window (`qml/VideoWindow.qml`). The sink is handed the
+   window's Wayland surface, so the picture is a sub-surface of that window -
+   which is what gives it a frame, dragging, resizing and fullscreen.
+4. **Panel.** The control panel (`qml/PlayerWindow.qml`) is a separate,
+   transparent window, and a **transient child of the picture window**. Weston
+   stacks a child immediately in front of its parent and keeps the two in the
+   same layer, so the controls stay above the picture - also in fullscreen.
 
 ```text
 Search window "YtGst"
   │  click a video
   ▼
-Player process "YtGst Player"
-  ├── yt-dlp -j ──────────────► metadata + HLS URLs (video / audio / subtitles)
+Player process
+  ├── yt-dlp -j ─────────────► metadata + stream URLs (HLS / DASH) + subtitles
   │
-  └── GStreamer
-        ├── playbin "vplay" → glupload → glcolorconvert → RGBA → qml6glsink ─┐
-        └── playbin "aplay" → autoaudiosink                                 │
-                                                                            ▼
-                                          QML: GstGLQt6VideoItem + controls
+  └── GStreamer pipeline (one clock, one set of seeks)
+        ├── souphttpsrc → hlsdemux → tsdemux → queue (10 s)
+        │     → h264parse → v4l2slh264dec → waylandsink ──► picture window
+        └── souphttpsrc → hlsdemux → decodebin
+              → audioconvert → audioresample → capsfilter (48 kHz S16LE stereo)
+              → volume → pulsesink
 ```
 
-YtGst prefers YouTube's **HLS** streams (`.m3u8`) because GStreamer can seek in
-them.
+The picture is **not** a playbin and **not** a GStreamer item inside the QML
+scene: the sink draws straight into the window. The sound is not a playbin
+either - both branches are explicit chains (see below).
 
-## Rendering and performance
+The panel fades out after five seconds without the pointer, but the subtitles do
+not: they live outside the part of the panel that fades.
 
-- **Hardware decoding.** With a working VA-API driver, GStreamer selects a
-  hardware decoder such as `vah264dec` instead of a software decoder such as
-  `avdec_h264`. YtGst raises the rank of the chosen decoder so it is picked
-  first.
-- **GPU rendering.** Frames stay in GPU memory (`GLMemory`) and are drawn by
-  Qt's GPU scene. Color conversion happens on the GPU (`glcolorconvert`).
+## Rendering
 
-### Graphics API: OpenGL only
-
-YtGst uses **OpenGL only**. Qt's RHI backend is pinned to the OpenGL backend
-(`OpenGLRhi`, `QQuickWindow::setGraphicsApi`) in `src/main.cpp`, instead of
-letting Qt auto-pick a backend. GStreamer's `qml6glsink` requires an OpenGL
-context to hand each video frame to Qt, so Qt renders the QML interface and the
-video through that single OpenGL context. This also matches OpenGL ES as used on
-embedded targets such as the STM32MP257F.
-
-Hardware decoding is separate from the graphics API: VA-API decodes frames on
-the GPU, and the decoded frames are uploaded to GL textures for drawing.
-
-A working graphics driver is required. Without one, Qt can fall back to
-software OpenGL (`llvmpipe`) and the CPU does the work, which defeats the
-purpose of YtGst.
+- **Vulkan by default.** `src/main.cpp` picks the RHI backend after the
+  application object exists: Vulkan when a Vulkan ICD is installed, otherwise
+  OpenGL and OpenGL ES. `YTGST_RENDERER=opengl` (or `vulkan`) forces one.
+- **Hardware video decoding.** The decoder is an explicit element in the chain,
+  and its rank is raised at startup. On the STM32MP25 that is `v4l2slh264dec`
+  (V4L2 stateless H.264); on a PC, `vah264dec` or `nvdec` can be configured.
+- **No buffering queue from a playbin.** A playbin buffers its HTTP stream in a
+  queue of its own and reports that buffering *into the pipeline it lives in*.
+  On the target this held the whole pipeline back whenever the audio fell
+  behind: a steady 30 fps dropped to 0 fps for seconds at a time. `decodebin`
+  and `souphttpsrc` keep no such queue, and a measured 26 periods in a row ran
+  at exactly 30.0 fps.
+- **A window is never hidden.** Hiding a Qt window destroys its Wayland surface,
+  and on the STM32MP25 the VeriSilicon Vulkan driver does not survive a surface
+  that is created again. The picture window is therefore mapped once and stays
+  mapped; closing the picture ends the player process instead. This is also why
+  the panel is a transient child rather than a window that is shown and hidden.
 
 ## Requirements
 
 Package names below are for Debian/Ubuntu-like systems.
 
-**Build tools**
+**Build tools:** `cmake` (>= 3.16), `g++` (C++17), `pkg-config`.
 
-| Package | Purpose |
+**Qt 6.8 or newer** - core, network, declarative and (for the picture window's
+frame) widgets, plus the QML modules for QtQuick and QtQuick.Controls.
+
+**GStreamer 1.0** with these elements:
+
+| Element | Package (Debian/Ubuntu) | Used for |
+| --- | --- | --- |
+| `souphttpsrc` | `gstreamer1.0-plugins-good` | Fetching the streams |
+| `hlsdemux`, `tsdemux`, `qtdemux`, `decodebin` | `gstreamer1.0-plugins-good` / `-bad` | Demuxing and autoplugging |
+| `h264parse`, `waylandsink` | `gstreamer1.0-plugins-bad` | Parsing, and the picture |
+| `audioconvert`, `audioresample`, `volume` | `gstreamer1.0-plugins-base` | The sound |
+| `v4l2slh264dec` | `gstreamer1.0-plugins-bad` (`v4l2codecs`) | Hardware decoding on the target |
+| `pulsesink` (or `pipewiresink`) | `gstreamer1.0-pulseaudio` | The sound server |
+
+Any decoder can be configured instead, for example `vah264dec` (`vainfo`/VA-API)
+or `avdec_h264` (software).
+
+**Runtime tools**
+
+| Tool | Why |
 | --- | --- |
-| `cmake` (>= 3.16) | Build system |
-| `g++` (C++17) | Compiler |
-| `pkg-config` | Locates GStreamer |
-
-**Qt 6 (>= 6.8.3)**
-
-YtGst requires Qt 6.8.3 or newer, matching the Qt shipped with the
-STM32MP257F BSP. When Qt is not installed in a system location, point CMake at
-it with `-DCMAKE_PREFIX_PATH=/path/to/Qt/6.8.3/gcc_64`. The development machine
-used for this project keeps Qt 6.8.3 in `/home/mint/Qt`.
-
-| Package | Purpose |
-| --- | --- |
-| `qt6-base-dev` | Qt core and network |
-| `qt6-declarative-dev` | Qt Quick / QML |
-| `qml6-module-qtquick` | `QtQuick` QML module |
-| `qml6-module-qtquick-controls` | `QtQuick.Controls` QML module |
-
-**GStreamer 1.0**
-
-| Package | Provides |
-| --- | --- |
-| `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libgstreamer-gl1.0-dev` | Development headers |
-| `gstreamer1.0-plugins-base` | `playbin` and base plugins |
-| `gstreamer1.0-plugins-good` | `souphttpsrc` and more |
-| `gstreamer1.0-plugins-bad` | `hlsdemux`, `vah264dec` |
-| `gstreamer1.0-gl` | `glupload`, `glcolorconvert` |
-| `gstreamer1.0-qt6` | `qml6glsink` |
-
-**GPU / video decoding (VA-API)** – pick the one for your card:
-
-| Package | For |
-| --- | --- |
-| `i965-va-driver` | Older Intel (Haswell/Broadwell) |
-| `intel-media-va-driver` | Newer Intel (`iHD`) |
-| `mesa-va-drivers` | AMD / Mesa |
-| NVIDIA driver | NVIDIA (NVDEC) |
-
-**yt-dlp** is required at runtime but is not bundled. See
-[yt-dlp](#yt-dlp) below.
+| `yt-dlp` | Streams, metadata, subtitles |
+| `ffmpeg` | Merging video + sound into the downloaded `.mp4` |
 
 ## Build and run
 
-A complete example, from a fresh Debian/Ubuntu machine to a running app.
-
-**1. Install the build dependencies**
-
 ```bash
-sudo apt update
-sudo apt install -y \
-  cmake g++ pkg-config \
-  qt6-base-dev qt6-declarative-dev \
-  qml6-module-qtquick qml6-module-qtquick-controls \
-  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-gl1.0-dev \
-  gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-gl gstreamer1.0-qt6 \
-  i965-va-driver intel-media-va-driver mesa-va-drivers
-```
-
-**2. Get the source**
-
-```bash
-git clone https://github.com/DanielMartensson/YtGst.git
-cd YtGst
-```
-
-**3. Configure with CMake**
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/home/mint/Qt/6.8.3/gcc_64
-```
-
-`-S .` is the source directory, `-B build` the build directory. CMake creates
-`build/`, keeps the source tree clean, and prints what it detected:
-
-```text
--- yt-dlp: /home/your-user/.local/bin/yt-dlp
--- Video decoder: vah264dec
-```
-
-`-DCMAKE_PREFIX_PATH` points at the Qt installation when it is not in a system
-location (for example the Qt 6.8.3 installed under `/home/mint/Qt`). It can be
-omitted when Qt 6.8.3 is installed system-wide.
-
-If yt-dlp is not found, or you want another decoder, add flags:
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DYTGST_YTDLP_PATH=/home/your-user/.local/bin/yt-dlp \
-  -DYTGST_VIDEO_DECODER=vah264dec \
-  -DYTGST_VAAPI_DRIVER=i965
-```
-
-**4. Build**
-
-```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
-```
-
-The executable is written to `build/ytgst`.
-
-**5. Run**
-
-```bash
 ./build/ytgst
 ```
 
-**Helper scripts.** Two convenience scripts wrap the steps above for this
-machine (Qt 6.8.3 in `/home/mint/Qt`):
+Point CMake at a Qt that is not installed system-wide with
+`-DCMAKE_PREFIX_PATH=/path/to/Qt/6.8.4/gcc_64`.
 
-```bash
-./setup.sh   # configure and build into build/
-./run.sh     # run with the correct Qt library path
-```
+A build for the STM32MP25 board is a Yocto recipe (`bitbake ytgst`); it passes
+`-DYTGST_VIDEO_DECODER=v4l2slh264dec` and depends on `ffmpeg`. Installing that
+package on the board is all the application needs.
 
-`setup.sh` configures CMake and builds, and honours `QT_PREFIX` for a custom Qt
-root (for example `QT_PREFIX=/opt/Qt ./setup.sh`). `run.sh` launches
-`build/ytgst` and sets `LD_LIBRARY_PATH` to the Qt libraries the binary is built
-against. This is needed on development machines where GStreamer's `qml6glsink`
-plugin is packaged against a different (system) Qt, so it would otherwise bind
-to the wrong `libQt6WaylandClient`. Arguments are passed through, for example:
+`cmake --install build` installs the executable; `qt_add_qml_module` compiles the
+QML into the binary, so there is nothing else to install.
 
-```bash
-./run.sh --play dQw4w9WgXcQ --title "My video"
-```
+### Command line
 
-On the STM32MP257F the build script is not needed and `./build/ytgst` runs
-directly, because the BSP's GStreamer `qt6` plugin is built against the BSP's
-own Qt.
+| Argument | Meaning |
+| --- | --- |
+| *(none)* | The search window |
+| `--play <video-id>` | Start a player for that video ID |
+| `--play <id> --title <text>` | The same, with the title already set |
+| `--watch <url>` | Play a YouTube URL directly, in a player of its own |
+| `--parent-pid <pid>` | Exit when that process goes away |
 
-**Everyday rebuilding.** After the first configuration, only:
-
-```bash
-cmake --build build -j"$(nproc)"
-```
-
-**Clean rebuild.** Delete the build directory and configure again:
-
-```bash
-rm -rf build
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/home/mint/Qt/6.8.3/gcc_64
-cmake --build build -j"$(nproc)"
-```
-
-**Debug build.** Use a separate build directory:
-
-```bash
-cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_PREFIX_PATH=/home/mint/Qt/6.8.3/gcc_64
-cmake --build build-debug -j"$(nproc)"
-./build-debug/ytgst
-```
-
-**Install system-wide**
-
-```bash
-sudo cmake --install build
-```
+`--parent-pid` is how the launcher makes sure no player (and no picture window)
+is left behind when the search window is closed.
 
 ## Compile-time options
 
-These are set when configuring with CMake, so YtGst can adapt to different
-machines without code changes.
-
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `YTGST_YTDLP_PATH` | empty (auto-detected) | Path to yt-dlp. Empty = auto via `find_program`, then `PATH`. |
-| `YTGST_VIDEO_DECODER` | `vah264dec` | GStreamer video decoder to prioritize. |
-| `YTGST_VAAPI_DRIVER` | empty (auto `i965`) | Value for `LIBVA_DRIVER_NAME`, e.g. `i965` or `iHD`. |
+| `YTGST_YTDLP_PATH` | empty (auto) | Path to yt-dlp; empty = `PATH` |
+| `YTGST_VIDEO_DECODER` | `vah264dec` | Video decoder named in the chain (`v4l2slh264dec`, `nvdec_h264`, ...) |
+| `YTGST_AUDIO_DECODER` | empty (auto) | Raises the rank of an audio decoder, e.g. `avdec_aac` |
+| `YTGST_AUDIO_SINK` | empty (auto) | Audio sink (`pulsesink`, `pipewiresink`, `alsasink`); empty = first that exists |
+| `YTGST_VIDEO_SINK` | empty (`waylandsink name=gsink`) | Replaces the video sink chain |
+| `YTGST_VAAPI_DRIVER` | empty (auto) | Value for `LIBVA_DRIVER_NAME`, e.g. `i965` or `iHD` |
 
-Common decoder values:
+Every one of them can also be overridden at runtime with an environment variable
+of the same name, for a quick comparison without a rebuild.
 
-| Value | Type |
+## Runtime environment
+
+| Variable | Effect |
 | --- | --- |
-| `vah264dec`, `vah265dec` | Intel/AMD VA-API (H.264 / H.265) |
-| `nvdec_h264`, `nvh264dec` | NVIDIA NVDEC |
-| `avdec_h264` | Software decoder (CPU), fallback only |
+| `YTGST_RENDERER=opengl\|vulkan` | Forces the RHI backend |
+| `YTGST_DEBUG_FPS=1` | Prints how many buffers the video sink consumes per second, and the timestamp of every 120th buffer |
+| `YTGST_NO_AUDIO=1` | Plays the picture alone, to tell a stutter the audio causes from one that is there anyway |
+| `YTGST_HEIGHT=<px>` | Starts at that height instead of the 480p default (the resolution menu overrides it) |
+| `YTGST_VIDEO_DECODER`, `YTGST_AUDIO_SINK`, `YTGST_VIDEO_SINK` | As the compile-time options above |
 
-Example:
+## Using the player
 
-```bash
-cmake -S . -B build \
-  -DYTGST_VIDEO_DECODER=vah265dec \
-  -DYTGST_VAAPI_DRIVER=iHD
-cmake --build build -j"$(nproc)"
-```
+The panel holds, from the left: play/pause, speed, resolution, subtitles,
+fullscreen, download, **panel size**, and on the right the volume and close.
 
-## yt-dlp
+- **Progress bar** across the top: click or drag to seek; a time bubble follows
+  the pointer. It ends exactly at the panel's edge.
+- **Resolution:** `Auto` or a fixed height. The choice applies to playback and to
+  downloads; `Auto` takes the best stream the target can decode.
+- **Subtitles:** the CC button lists every track (manual and automatic). White
+  text on a black plate.
+- **Panel size S / M / L / XL:** scales the whole panel proportionally - every
+  margin, icon, font and the window itself. S is the original 720x140 strip, M is
+  1.5x, L is 2x and XL is 2.5x. The scale is clamped to the screen width, so XL
+  uses 2.5x on a 1920 pixel output and less on a smaller one.
+- **Volume:** click the speaker for a horizontal slider, quiet on the left.
+- **Fade:** after five seconds without the pointer the controls fade away; the
+  subtitles stay. Moving the pointer over the panel brings them back.
+- **Close:** the panel's X, the picture's X, `Esc` and closing the search window
+  all end the player process (and with it both windows). Closing the search
+  window closes every player.
 
-yt-dlp is a standalone Python program that YtGst starts as a subprocess. It is
-not bundled and must be installed separately.
+### Keyboard shortcuts
 
-**Where YtGst looks for it, in order:**
+| Key | Function |
+| --- | --- |
+| `M` | Mute on/off |
+| `Up` / `Down` | Volume up / down |
+| `D` | Start / cancel download |
+| `F` or `F11` | Fullscreen on/off |
+| `Esc` | Close the player |
 
-1. The path compiled in via `YTGST_YTDLP_PATH` (used if the file exists).
-2. The system `PATH`, like any normal command.
-
-So yt-dlp can live almost anywhere as long as it can be found, for example
-`/usr/bin/yt-dlp`, `/usr/local/bin/yt-dlp` or `~/.local/bin/yt-dlp`.
-
-**Install (recommended, standalone binary):**
-
-```bash
-mkdir -p ~/.local/bin
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-  -o ~/.local/bin/yt-dlp
-chmod +x ~/.local/bin/yt-dlp
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-```
-
-**Install via package manager (may be older):**
-
-```bash
-sudo apt install yt-dlp
-# or
-pipx install yt-dlp
-```
-
-**Update now and then**, since YouTube changes often:
-
-```bash
-yt-dlp -U          # standalone binary
-pipx upgrade yt-dlp
-```
+The shortcuts are application-wide on purpose, so they also work while the
+picture window has focus.
 
 ## Downloads
 
 Click the download button (or press `D`) to download the current video.
 
-- **Folder:** the system download folder, normally `~/Downloads`. If it cannot
-  be found, the movies folder is used, then the home directory.
-- **File name:** `%(title)s [%(id)s].%(ext)s`, e.g.
-  `Never Gonna Give You Up [dQw4w9WgXcQ].mkv`.
-- **Format:** best video + best audio, merged into a single **MKV** file.
-- **Progress** is shown in a small box above the button.
+- **Resolution:** the one selected in the panel. With `Auto`, the best stream.
+- **Format:** one **`.mp4`** with **H.264 video and AAC sound**, so any player
+  opens it. VP9/Opus or AV1 are accepted as fallbacks when a video has no H.264.
+- **Folder:** the system download folder, normally `~/Downloads`; otherwise the
+  movies folder, then the home directory.
+- **File name:** `%(title)s [%(id)s].%(ext)s`.
+- **Status:** "Downloading … %", then "Finishing the download …" while the two
+  streams are merged, then "Download complete" for ten seconds. The button turns
+  back into a download arrow when it is done.
 - **Cancel:** click the button again (or press `D` again).
 
 yt-dlp is run with approximately:
@@ -339,116 +230,104 @@ yt-dlp is run with approximately:
 --newline --no-warnings --no-playlist
 -P <download folder>
 -o "%(title)s [%(id)s].%(ext)s"
--f bestvideo+bestaudio/best
---merge-output-format mkv
+-f "bv*[vcodec^=avc1][height<=H]+ba[ext=m4a]/bv*[ext=mp4][height<=H]+ba[ext=m4a]/..."
+--merge-output-format mp4 --remux-video mp4
 <video URL>
 ```
+
+**ffmpeg is required** - it is what merges the two streams. Without it yt-dlp
+leaves the streams as separate files.
+
+## Subtitles
+
+Both **manual** subtitles (made by the channel) and **automatically generated or
+translated** ones are supported.
+
+1. When a video is loaded, all tracks are listed in the CC menu.
+2. Picking a language fetches the subtitle into a per-language cache, so
+   switching back and forth is fast.
+3. Cues are parsed from YouTube's `json3` (preferred) or VTT and shown at the
+   bottom of the panel, on a black plate with white text.
+
+**Cookies from the browser.** YouTube requires an authenticated request for
+automatically translated subtitles (otherwise `HTTP 429`). YtGst lets yt-dlp
+fetch cookies from an installed browser (Firefox, Chromium, Chrome, Brave, Edge,
+Vivaldi or Opera) when a video is loaded. They are written to a temporary file
+that is read and deleted immediately; only `youtube.com` receives them. Without a
+browser, manual subtitles still work.
 
 ## Project structure
 
 ```text
-ytgst/
-├── CMakeLists.txt        Build rules, dependencies and compile-time options
+YtGst/
+├── CMakeLists.txt          Build rules, dependencies and compile-time options
 ├── qml/
-│   ├── Main.qml          Search window "YtGst"
-│   ├── PlayerWindow.qml  Player window "YtGst Player" with all controls
-│   ├── SearchBar.qml     Search field
-│   ├── VideoCard.qml     One video card in the list
-│   └── Spinner.qml       Loading indicator
+│   ├── Main.qml            Search window "YtGst", with its own frame
+│   ├── PlayerWindow.qml    The control panel (transparent, scaled S-XL)
+│   ├── VideoWindow.qml     The picture's window, with its frame and buttons
+│   ├── SearchBar.qml       Search field
+│   ├── VideoCard.qml       One video card in the list
+│   └── Spinner.qml         Loading indicator
 └── src/
-    ├── main.cpp          Entry point, graphics API, starts the player process
-    ├── player.cpp/.h     Player: yt-dlp, GStreamer pipeline, subtitles, download
-    ├── youtube.cpp/.h    YouTube search (Innertube)
-    ├── videomodel.cpp/.h List model with video cards
-    └── ytdlp.h           Locates yt-dlp (compiled path or PATH)
+    ├── main.cpp            Entry point, RHI backend, launcher, player process
+    ├── player.cpp/.h       yt-dlp, both pipelines, subtitles, download, window embedding
+    ├── youtube.cpp/.h      YouTube search (Innertube)
+    ├── videomodel.cpp/.h   List model with video cards
+    └── ytdlp.h             Locates yt-dlp (compiled path or PATH)
 ```
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.cpp` | Initializes GStreamer, selects VA-API driver and decoder, pins Qt to OpenGL, opens the search or player window. `Launcher` starts the player process. |
-| `src/player.*` | Fetches metadata with yt-dlp, builds the pipeline, and handles play/pause, seek, speed, resolution, volume, subtitles and downloads. Exposed to QML via `Q_PROPERTY` / `Q_INVOKABLE`. |
-| `src/youtube.*` | Sends search and continuation requests to YouTube's internal API, parses the JSON, and fetches like counts in the background with yt-dlp. |
+| `src/main.cpp` | Picks the graphics API, raises decoder ranks, runs the search window or a player, starts player processes and watches the parent process. |
+| `src/player.*` | Fetches metadata with yt-dlp, builds the video and audio chains, embeds the sink in the picture window, and handles play/pause, seek, speed, resolution, volume, subtitles and downloads. |
+| `src/youtube.*` | Sends search and continuation requests to YouTube's internal API and parses the JSON. |
 | `src/videomodel.*` | A `QAbstractListModel` holding the video list. |
-| `src/ytdlp.h` | Small helper returning the yt-dlp path. |
-| `qml/Main.qml` | Search field, list and error messages. |
-| `qml/PlayerWindow.qml` | Video surface, seek bar, play/pause, speed, resolution, subtitles, fullscreen, download and volume. Controls fade out after 5 s. |
-
-## Subtitles
-
-YtGst supports both **manual** subtitles (made by the channel) and
-**automatically generated or translated** subtitles.
-
-1. When a video is loaded, all tracks are listed in the CC menu.
-2. Picking a language fetches the subtitle into a **per-language cache**, so
-   switching back and forth is fast.
-3. Subtitles are parsed into time-stamped cues and shown in a box at the
-   bottom. The format is YouTube's `json3` first, otherwise VTT.
-
-**Cookies from the browser.** YouTube requires an authenticated request for
-automatically translated subtitles (otherwise `HTTP 429`). YtGst lets yt-dlp
-fetch **cookies from an installed browser** (Firefox, Chromium, Chrome, Brave,
-Edge, Vivaldi or Opera) when a video is loaded. The cookies are written to a
-temporary file that is read and deleted immediately; only `youtube.com`
-receives them. Sign in to YouTube in your browser for best results. Without a
-browser, manual subtitles still work.
-
-## Keyboard shortcuts
-
-| Key / action | Function |
-| --- | --- |
-| Click a video (search window) | Open it in a new player window |
-| `M` | Mute on/off |
-| `Up` / `Down` | Volume up / down |
-| `D` | Start / cancel download |
-| `F` or `F11` | Fullscreen on/off |
-| `Esc` | Leave fullscreen, otherwise close the window |
+| `qml/Main.qml` | Search field, list, error messages and the window frame. |
+| `qml/PlayerWindow.qml` | The panel: seek bar, play/pause, speed, resolution, subtitles, fullscreen, download, panel size, volume and close. |
+| `qml/VideoWindow.qml` | The picture's window: title bar, drag, resize, fullscreen and close. |
 
 ## Troubleshooting
 
-**"qml6glsink saknas – installation av gstreamer1.0-qt6 krävs"**
+**No sound.** Check the sound server and the sink's volume first:
 
 ```bash
-sudo apt install gstreamer1.0-qt6
+pactl list sinks | grep -E "Name:|Mute:|Volume"
+gst-launch-1.0 audiotestsrc num-buffers=430 samplesperbuffer=1024 \
+  ! audioconvert ! audioresample ! pulsesink     # about 9 seconds of tone
 ```
 
-**"yt-dlp hittades inte"** – install yt-dlp and make sure it is in `PATH`, or
-build with `-DYTGST_YTDLP_PATH=/path/to/yt-dlp`.
+If the tone is audible, the output is fine. `YTGST_DEBUG_FPS=1` then tells you
+whether the picture and the sound keep up; `YTGST_NO_AUDIO=1` plays the picture
+alone.
 
-**Black screen / no video** – check that the GPU and OpenGL work:
+**The window freezes or the compositor dies.** Almost always the graphics driver
+running out of memory. A large control panel (XL) plus a video is the heaviest
+case; the panel scale is clamped to the screen width, but a driver with a small
+carve-out can still be pushed too far - use a smaller panel size. Look for
+`core0 hang` or `cma_alloc ... failed` in `dmesg`.
+
+**Black picture, or the player exits immediately.** Check the decoder:
 
 ```bash
-glxinfo | grep "OpenGL renderer"     # should show your GPU, not llvmpipe
-vainfo                               # should show VA-API profiles
+gst-inspect-1.0 v4l2slh264dec      # or the decoder you configured
+YTGST_DEBUG_FPS=1 ./build/ytgst --watch <url>
 ```
 
-**Stuttering or high CPU**
+**Streaming stutters.** Make sure the platform's hardware decoder is the one in
+use; a software H.264 decoder on a small CPU cannot keep up with 1080p. Also
+check that nothing else competes for the GPU.
 
-- Check that hardware decoding is used: run with `GST_DEBUG=3` and look for
-  `vah264dec`, or test `gst-inspect-1.0 vah264dec`.
-- Try another decoder or VA driver via the compile-time options.
-- Make sure you are not on software OpenGL (`llvmpipe`).
-
-**Subtitles only work for some languages** – sign in to YouTube in your
-browser; automatically translated subtitles require cookies.
-
-**Debug with GStreamer**
-
-```bash
-GST_DEBUG=3 ./build/ytgst            # very verbose
-GST_DEBUG=*:4 ./build/ytgst 2> gst.log
-```
+**Downloads stay as two files.** Install `ffmpeg` - yt-dlp needs it to merge.
 
 ## Known limitations
 
-- **GPU rendering only.** Without a working graphics driver, Qt may fall back
-  to software OpenGL and CPU usage becomes high.
-- **OpenGL only.** The RHI backend is pinned to OpenGL (`OpenGLRhi`) in
-  `src/main.cpp`, so rendering is OpenGL/OpenGL ES.
-- **HLS is preferred.** YtGst selects HLS streams because they can be seeked.
-  Some high resolutions may not exist in HLS, so the best available
-  alternative is used.
+- **A window must never be hidden** (see Rendering); the design keeps every
+  window mapped for the whole session instead.
+- **H.264 on the target.** The STM32MP25 VPU decodes H.264 (and VP8); VP9/AV1
+  are decoded in software, which is far too slow at 1080p, so streams are pinned
+  to H.264 where that is the case.
+- **HLS is preferred** over DASH because GStreamer can seek in it; some high
+  resolutions may only exist as DASH.
 - **Subtitles may require signing in** (cookies) to YouTube.
 - **Network is always required.** Neither search nor playback works offline.
 - **yt-dlp must be reasonably up to date**, since YouTube changes often.
-
-

@@ -43,15 +43,28 @@ Window {
     readonly property var panelSizeNames: ["S", "M", "L", "XL"]
     // Set by setPanelSize(); a plain property so the window size can never be
     // computed from a half-initialised binding.
+    readonly property int screenWidth: playerWindow.screen ? playerWindow.screen.width : 1920
     property real panelScale: 1.0
     readonly property string panelSizeName: panelSizeNames[panelSizeIndex]
+
+    // The largest scale that still fits on the output the panel is on: on a
+    // 1280 pixel screen the 2.5x panel (1800 px) would hang off the edge, so
+    // the size is clamped instead of leaving controls out of reach. Panel and
+    // player are laid out in the same logical pixels, so the player looks and
+    // behaves the same on a 1280x720 screen, a 1920x1080 one or a 4K output.
+    function scaleFor(index) {
+        const maxFit = Math.max(0.5, (screenWidth - 16) / 720);
+        return Math.min(panelScales[index], maxFit);
+    }
 
     function setPanelSize(index) {
         if (index < 0 || index >= panelScales.length || index === panelSizeIndex)
             return;
         panelSizeIndex = index;
-        panelScale = panelScales[index];
+        panelScale = scaleFor(index);
     }
+
+    onScreenWidthChanged: panelScale = scaleFor(panelSizeIndex)
 
     function cyclePanelSize() {
         setPanelSize((panelSizeIndex + 1) % panelScales.length);
