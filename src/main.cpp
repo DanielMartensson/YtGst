@@ -265,6 +265,18 @@ public:
         }
     }
 
+    // Closing the search window quits the application. It is done here rather
+    // than by letting the window close on its own: the Quick window's teardown
+    // races the Vulkan driver's WSI thread, which makes the process die with a
+    // SIGSEGV instead of a clean exit (and then the players it started are
+    // orphaned).
+    Q_INVOKABLE void quit()
+    {
+        qInfo("YtGst: closing the search window");
+        stopPlayers();
+        QCoreApplication::quit();
+    }
+
     Q_INVOKABLE void play(const QString &videoId, const QString &title)
     {
         if (videoId.isEmpty())
@@ -273,7 +285,9 @@ public:
         auto *player = new QProcess(this);
         player->setProgram(QCoreApplication::applicationFilePath());
         player->setArguments({QStringLiteral("--play"), videoId,
-                              QStringLiteral("--title"), title});
+                              QStringLiteral("--title"), title,
+                              QStringLiteral("--parent-pid"),
+                              QString::number(QCoreApplication::applicationPid())});
         player->start();
         m_players.append(player);
     }
@@ -485,6 +499,24 @@ int main(int argc, char *argv[])
     if (titleIndex >= 0 && titleIndex + 1 < args.size())
         playTitle = args.at(titleIndex + 1);
 
+    qint64 parentPid = 0;
+    const int parentIndex = args.indexOf(QStringLiteral("--parent-pid"));
+    if (parentIndex >= 0 && parentIndex + 1 < args.size())
+        parentPid = args.at(parentIndex + 1).toLongLong();
+
+    // A player belongs to the search window that started it. If that window
+    // disappears without stopping its players - closed, or killed before it
+    // could - the player must not stay behind with its windows on screen.
+    if (parentPid > 0) {
+        auto *watchdog = new QTimer(&app);
+        watchdog->setInterval(2000);
+        QObject::connect(watchdog, &QTimer::timeout, &app, [parentPid]() {
+            if (::getppid() != parentPid)
+                QCoreApplication::quit();
+        });
+        watchdog->start();
+    }
+
     Launcher launcher;
     // The search window owns the players: closing it closes the video window
     // too, instead of leaving it (and its invisible panel) on screen.
@@ -510,6 +542,21 @@ int main(int argc, char *argv[])
             root->setProperty("videoId", playId);
             root->setProperty("videoTitle", playTitle);
         }
+    }
+
+    // TEMPORARY test hooks, removed before the release: drive the two close
+    // paths (and the window close request) from the environment.
+    if (!engine.rootObjects().isEmpty()) {
+        QObject *root = engine.rootObjects().first();
+        auto *window = qobject_cast<QQuickWindow *>(root);
+        if (const QByteArray ms = qgetenv("YTGST_TEST_CLOSE_MS"); !ms.isEmpty() && window)
+            QTimer::singleShot(ms.toInt(), window, [window]() { window->close(); });
+        if (const QByteArray ms = qgetenv("YTGST_TEST_CLOSEPLAYER_MS"); !ms.isEmpty())
+            QTimer::singleShot(ms.toInt(), root, [root]() {
+                QMetaObject::invokeMethod(root, "closePlayer");
+            });
+        if (const QByteArray ms = qgetenv("YTGST_TEST_LAUNCHERQUIT_MS"); !ms.isEmpty())
+            QTimer::singleShot(ms.toInt(), &launcher, [&launcher]() { launcher.quit(); });
     }
 
     // Show a warning dialog at startup if GPU acceleration is unavailable.

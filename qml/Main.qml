@@ -142,6 +142,15 @@ Window {
     // ------------------------------------------------------------------
     // Frame
     // ------------------------------------------------------------------
+    // A close request from the compositor takes the same road as the close
+    // button: stop the players first, then quit (see Launcher::quit()). The
+    // close itself is refused, because hiding the window would destroy its
+    // Wayland surface while the Vulkan driver's WSI thread still uses it.
+    onClosing: (close) => {
+        close.accepted = false;
+        launcher.quit();
+    }
+
     Rectangle {
         id: titleBar
         anchors.top: parent.top
@@ -203,8 +212,8 @@ Window {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 // Closing this window closes the players it started as well
-                // (see Launcher::stopPlayers()).
-                onClicked: root.close()
+                // (see Launcher::quit()).
+                onClicked: launcher.quit()
             }
         }
 

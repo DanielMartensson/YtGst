@@ -152,14 +152,7 @@ Window {
         videoTitle: playerWindow.videoTitle
         fullscreen: player.fullscreen
 
-        onCloseRequested: {
-            // The picture's window cannot be closed on its own: hiding it
-            // destroys its Wayland surface, and the board's Vulkan driver does
-            // not survive that. Closing it therefore ends the player, and the
-            // search window (which owns the player) stays open.
-            player.stop();
-            Qt.quit();
-        }
+        onCloseRequested: playerWindow.closePlayer()
     }
 
     // ------------------------------------------------------------------
@@ -677,7 +670,7 @@ Window {
             id: closeButtonMouse
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: playerWindow.close()
+            onClicked: playerWindow.closePlayer()
         }
     }
 
@@ -885,13 +878,23 @@ Window {
         }
     }
 
-    onClosing: {
-        // Closing the panel ends the player. The picture's window is never
-        // hidden (hiding destroys its Wayland surface), it goes away with the
-        // process.
+    // Closing the panel ends the player, and with it the picture's window. The
+    // picture's window cannot be hidden on its own - hiding destroys its
+    // Wayland surface, which the board's Vulkan driver does not survive - so
+    // closing the picture ends the process that owns it.
+    function closePlayer() {
+        console.log("YtGst: closing the player");
         player.stop();
         videoId = "";
         Qt.quit();
+    }
+
+    onClosing: (close) => {
+        // Refuse the close: the window must not be hidden (its Wayland surface
+        // would be destroyed, and the board's Vulkan driver does not survive
+        // that), so the process ends instead - and the windows with it.
+        close.accepted = false;
+        playerWindow.closePlayer();
     }
 
     // ------------------------------------------------------------------
