@@ -5,10 +5,15 @@ import Ytgst
 Window {
     id: playerWindow
 
-    width: 720
-    height: 140
-    minimumWidth: 560
-    minimumHeight: 140
+    // The panel is laid out once at 720x140 and then scaled as a whole, so
+    // every margin, icon and font grows by exactly the same factor. The window
+    // grows with it (panelRoot below does the scaling), and the controls are
+    // rendered at the larger size through a supersampled layer, so text stays
+    // sharp instead of being magnified.
+    width: Math.round(720 * panelScale)
+    height: Math.round(140 * panelScale)
+    minimumWidth: Math.round(560 * panelScale)
+    minimumHeight: Math.round(140 * panelScale)
     visible: false
     // The picture has a window of its own (VideoWindow.qml, filled by
     // waylandsink), so the panel is only the controls: a frameless, see-through
@@ -28,6 +33,26 @@ Window {
     // it while the controls are invisible.
     property int autoHideInterval: 5000
     property bool chromeVisible: true
+
+    // Panel size: S is the original 720x140 strip, the others scale the whole
+    // panel proportionally. XL stops at 2.5x because the panel is centred on a
+    // 1920 pixel wide output (720 * 2.5 = 1800) - at 3x it would be wider than
+    // the screen.
+    property int panelSizeIndex: 0
+    readonly property var panelScales: [1.0, 1.5, 2.0, 2.5]
+    readonly property var panelSizeNames: ["S", "M", "L", "XL"]
+    readonly property real panelScale: panelScales[panelSizeIndex]
+    readonly property string panelSizeName: panelSizeNames[panelSizeIndex]
+
+    function setPanelSize(index) {
+        if (index < 0 || index >= panelScales.length || index === panelSizeIndex)
+            return;
+        panelSizeIndex = index;
+    }
+
+    function cyclePanelSize() {
+        setPanelSize((panelSizeIndex + 1) % panelScales.length);
+    }
 
     // ------------------------------------------------------------------
     // Helpers
@@ -634,6 +659,65 @@ Window {
         }
     }
 
+    // Panel size (S/M/L/XL). Scales the whole strip proportionally: S is the
+    // panel as it has always looked, M is 1.5x, L 2x and XL 2.5x.
+    Rectangle {
+        id: sizeButton
+        width: 46
+        height: 40
+        radius: 20
+        color: sizeButtonMouse.pressed ? "#e6000000" : "#b3000000"
+        border.color: "#33ffffff"
+        border.width: 1
+        z: 3
+        anchors.top: parent.top
+        anchors.left: downloadButton.right
+        anchors.leftMargin: 8
+        anchors.topMargin: 52
+
+        Text {
+            anchors.centerIn: parent
+            color: "#ffffff"
+            font.pixelSize: 13
+            font.bold: true
+            text: playerWindow.panelSizeName
+        }
+
+        MouseArea {
+            id: sizeButtonMouse
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: sizeMenu.open()
+        }
+
+        Menu {
+            id: sizeMenu
+            width: 140
+            y: -height - 6
+            x: (sizeButton.width - width) / 2
+            MenuItem {
+                text: qsTr("Small")
+                font.bold: playerWindow.panelSizeIndex === 0
+                onTriggered: playerWindow.setPanelSize(0)
+            }
+            MenuItem {
+                text: qsTr("Medium")
+                font.bold: playerWindow.panelSizeIndex === 1
+                onTriggered: playerWindow.setPanelSize(1)
+            }
+            MenuItem {
+                text: qsTr("Large")
+                font.bold: playerWindow.panelSizeIndex === 2
+                onTriggered: playerWindow.setPanelSize(2)
+            }
+            MenuItem {
+                text: qsTr("Extra large")
+                font.bold: playerWindow.panelSizeIndex === 3
+                onTriggered: playerWindow.setPanelSize(3)
+            }
+        }
+    }
+
     // Close. The panel is the process's only visible control, so closing it also
     // takes the video window down (close -> stop -> quit). The video window can
     // still be closed on its own from its title bar, which leaves the panel
@@ -838,6 +922,24 @@ Window {
     }
 
     // ------------------------------------------------------------------
+    // Everything on the panel lives inside this item, which is laid out at the
+    // original 720x140 and scaled as a whole. The layer renders the contents at
+    // the scaled resolution, so the scale-up is a 1:1 mapping of already-sharp
+    // pixels instead of a magnified small rendering.
+    // ------------------------------------------------------------------
+    Item {
+        id: panelRoot
+        width: 720
+        height: 140
+        transformOrigin: Item.TopLeft
+        scale: playerWindow.panelScale
+        layer.enabled: true
+        layer.smooth: true
+        layer.textureSize: Qt.size(Math.ceil(width * playerWindow.panelScale),
+                                   Math.ceil(height * playerWindow.panelScale))
+    }
+
+    // ------------------------------------------------------------------
     // Subtitles: white on a black plate, and they stay on screen when the
     // controls fade away. Every other item of the panel is moved into the
     // "chrome" container below, which is what the fade animates.
@@ -854,7 +956,7 @@ Window {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 8
-        width: Math.min(subtitleText.implicitWidth, playerWindow.width - 40) + 24
+        width: Math.min(subtitleText.implicitWidth, panelRoot.width - 40) + 24
         height: subtitleText.implicitHeight + 12
         z: 4
 
@@ -880,15 +982,18 @@ Window {
     }
 
     // The controls are collected here once the window's items exist, so the
-    // fade above can exclude the subtitles. The container covers the window,
-    // so every item keeps its anchors.
+    // fade above can exclude the subtitles. The container covers the scaled
+    // root, so every item keeps its anchors and grows with the panel.
     Component.onCompleted: {
         const items = playerWindow.contentItem.children.slice();
         for (let i = 0; i < items.length; ++i) {
             const item = items[i];
-            if (item !== chrome && item !== subtitleBox)
-                item.parent = chrome;
+            if (item === chrome || item === subtitleBox || item === panelRoot)
+                continue;
+            item.parent = chrome;
         }
+        chrome.parent = panelRoot;
+        subtitleBox.parent = panelRoot;
     }
 
     // ------------------------------------------------------------------
