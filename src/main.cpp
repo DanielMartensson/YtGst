@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QList>
 #include <QMessageBox>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
@@ -240,20 +241,45 @@ static void pickGraphicsApi()
 
 // Starts the player as a separate process with its own QQuickWindow/GL context.
 // The main window ("YtGst") stays open while "YtGst Player" plays.
+//
+// The players are kept as children of this process: a video window must not
+// outlive the window that started it, and a second click on a video replaces
+// the first player instead of stacking another one on top of it.
 class Launcher : public QObject
 {
     Q_OBJECT
 public:
     using QObject::QObject;
 
+    void stopPlayers()
+    {
+        const QList<QProcess *> players = m_players;
+        m_players.clear();
+        for (QProcess *player : players) {
+            if (player->state() != QProcess::NotRunning) {
+                player->terminate();
+                if (!player->waitForFinished(3000))
+                    player->kill();
+            }
+            player->deleteLater();
+        }
+    }
+
     Q_INVOKABLE void play(const QString &videoId, const QString &title)
     {
         if (videoId.isEmpty())
             return;
-        QProcess::startDetached(QCoreApplication::applicationFilePath(),
-                                {QStringLiteral("--play"), videoId,
-                                 QStringLiteral("--title"), title});
+        stopPlayers();
+        auto *player = new QProcess(this);
+        player->setProgram(QCoreApplication::applicationFilePath());
+        player->setArguments({QStringLiteral("--play"), videoId,
+                              QStringLiteral("--title"), title});
+        player->start();
+        m_players.append(player);
     }
+
+private:
+    QList<QProcess *> m_players;
 };
 
 // Reads the GL renderer (for example "llvmpipe" when rendering in software)
@@ -460,6 +486,10 @@ int main(int argc, char *argv[])
         playTitle = args.at(titleIndex + 1);
 
     Launcher launcher;
+    // The search window owns the players: closing it closes the video window
+    // too, instead of leaving it (and its invisible panel) on screen.
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &launcher,
+                     [&launcher]() { launcher.stopPlayers(); });
 
     QQmlApplicationEngine engine;
     QObject::connect(

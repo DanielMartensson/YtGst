@@ -27,6 +27,9 @@ Window {
 
     property string videoTitle: ""
     property bool fullscreen: false
+    // True once a picture has been shown: the stop button leaves an empty
+    // window behind, and that is what tells "stopped" from "not started yet".
+    property bool everPlayed: false
 
     readonly property int titleHeight: 34
     readonly property int frameWidth: 4
@@ -38,7 +41,8 @@ Window {
     minimumWidth: 482
     minimumHeight: 272 + titleHeight
     visible: false
-    color: "#26262b"
+    // The same colour as the search window, so the two look like one program.
+    color: "#0b0b0c"
     title: videoTitle.length > 0 ? videoTitle : qsTr("YtGst Player")
     // The frame is ours; asking for platform decorations would only be answered
     // by a compositor that draws them.
@@ -107,7 +111,7 @@ Window {
         anchors.left: parent.left
         anchors.right: parent.right
         height: videoWindow.titleHeight
-        color: "#1b1b1e"
+        color: "#0b0b0c"
 
         MouseArea {
             id: titleDragArea
@@ -199,13 +203,20 @@ Window {
 
                 Canvas {
                     anchors.centerIn: parent
-                    width: 14
-                    height: 14
+                    width: 16
+                    height: 16
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
+                        // The usual stop symbol - a ring with a square in it -
+                        // so the button does not read as a close button.
+                        ctx.strokeStyle = "#ffffff";
+                        ctx.lineWidth = 1.6;
+                        ctx.beginPath();
+                        ctx.arc(8, 8, 6.4, 0, 2 * Math.PI);
+                        ctx.stroke();
                         ctx.fillStyle = "#ffffff";
-                        ctx.fillRect(3, 3, 8, 8);
+                        ctx.fillRect(5.2, 5.2, 5.6, 5.6);
                     }
                 }
 
@@ -217,6 +228,16 @@ Window {
                     onClicked: videoWindow.stopRequested()
                 }
             }
+        }
+
+        // The frame is drawn in the same colour as the window, so a line under
+        // the title bar is what separates it from the picture.
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 1
+            color: "#26262b"
         }
     }
 
@@ -280,5 +301,51 @@ Window {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Stopped picture
+    // ------------------------------------------------------------------
+    Connections {
+        target: videoWindow.playback
+        function onPlayingChanged() {
+            if (videoWindow.playback.playing)
+                videoWindow.everPlayed = true;
+        }
+    }
+
+    // The sink's sub-surface is gone once the playback has stopped, so the
+    // window's own content is visible again.
+    Column {
+        anchors.centerIn: parent
+        anchors.verticalCenterOffset: videoWindow.fullscreen ? 0 : videoWindow.titleHeight / 2
+        spacing: 8
+        visible: videoWindow.everPlayed && !videoWindow.playback.playing
+                 && videoWindow.playback.duration === 0
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: qsTr("Stopped")
+            color: "#e8e8ea"
+            font.pixelSize: 20
+            font.bold: true
+        }
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: qsTr("Press play in the control panel to start again")
+            color: "#8a8a92"
+            font.pixelSize: 13
+        }
+    }
+
+    // A one-pixel outline: the window has the same colour as the search window,
+    // so without it the edges would blend into the desktop.
+    Rectangle {
+        anchors.fill: parent
+        color: "transparent"
+        border.color: "#26262b"
+        border.width: 1
+        z: 2
     }
 }
