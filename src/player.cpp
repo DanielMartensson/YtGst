@@ -191,16 +191,6 @@ static QString cookieFilePath()
     return QDir::tempPath() + QStringLiteral("/ytgst-cookies.txt");
 }
 
-// Sets the User-Agent on playbin's internal source (playbin has no writable
-// "source" property, so this is done through the "source-setup" signal).
-static void onSourceSetup(GstElement *, GstElement *source, gpointer)
-{
-    if (g_object_class_find_property(G_OBJECT_GET_CLASS(source), "user-agent"))
-        g_object_set(source, "user-agent",
-                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-                     nullptr);
-}
-
 // Links a pad that a demuxer only exposes once the stream arrives to the next
 // element in the chain.
 //
@@ -247,6 +237,15 @@ static void onDemuxPadAdded(GstElement *, GstPad *pad, gpointer userData)
         gst_caps_unref(caps);
     if (video)
         linkDemuxPadTo(pad, GST_ELEMENT(userData));
+}
+
+// decodebin exposes one pad per stream it decoded. In the audio branch that is
+// the audio, which continues into audioconvert.
+static void onDecodebinPadAdded(GstElement *, GstPad *pad, gpointer userData)
+{
+    if (GST_PAD_DIRECTION(pad) != GST_PAD_SRC)
+        return;
+    linkDemuxPadTo(pad, GST_ELEMENT(userData));
 }
 
 // gst_bin_get_by_name() only looks at direct children; the video sink chain is
@@ -1018,21 +1017,10 @@ void Player::embedVideoIntoWindow()
 
 void Player::applyVolume()
 {
-    if (!m_pipeline)
-        return;
-
-    const double effective = m_muted ? 0.0 : m_volume;
-    const char *names[] = {"vplay", "aplay"};
-    for (const char *name : names) {
-        GstElement *play = gst_bin_get_by_name(GST_BIN(m_pipeline), name);
-        if (!play)
-            continue;
-        // The video branch is a plain chain now, not a playbin, so it has no
-        // "volume" property; only the audio playbin is set.
-        if (g_object_class_find_property(G_OBJECT_GET_CLASS(play), "volume"))
-            g_object_set(play, "volume", effective, nullptr);
-        gst_object_unref(play);
-    }
+    // The sound goes through the "volume" element of the audio chain (the video
+    // branch is a plain chain with no volume of its own).
+    if (m_audioVolume)
+        g_object_set(m_audioVolume, "volume", m_muted ? 0.0 : m_volume, nullptr);
 }
 
 void Player::updateProgress()
@@ -1228,6 +1216,7 @@ void Player::handleFetchOutput()
         audioUrl = requested.at(1).toObject().value(QStringLiteral("url")).toString();
         actualHeight = requested.at(0).toObject().value(QStringLiteral("height")).toInt();
         m_videoProtocol = requested.at(0).toObject().value(QStringLiteral("protocol")).toString();
+        m_audioProtocol = requested.at(1).toObject().value(QStringLiteral("protocol")).toString();
     } else {
         videoUrl = obj.value(QStringLiteral("url")).toString();
         actualHeight = obj.value(QStringLiteral("height")).toInt();
@@ -1350,6 +1339,10 @@ void Player::buildPipeline()
 
     m_pipeline = gst_pipeline_new("pipe");
     m_audioPlay = nullptr;
+    if (m_audioVolume) {
+        gst_object_unref(m_audioVolume);
+        m_audioVolume = nullptr;
+    }
 
     // === VIDEO: an explicit chain instead of a playbin ===
     // A playbin/uridecodebin inserts a buffering queue (use-buffering=true,
@@ -1515,27 +1508,102 @@ void Player::buildPipeline()
             // for how to measure the picture).
             qWarning("YtGst: YTGST_NO_AUDIO=1 - playing without audio");
         } else {
-            // === AUDIO: a playbin in the same pipeline, on purpose ===
-            // In the same pipeline the sound and the picture share one clock,
-            // one base time and one set of seeks, so they stay in step by
-            // construction and pause/resume/rate need no special care. The
-            // audio branch costs the picture nothing - measured on this board
-            // with progressreport between the decoder and the sink: video
-            // alone, video + audio (fetched with souphttpsrc or curlhttpsrc) and
-            // audio in a pipeline of its own all reach 43 s of content in 45 s
-            // of wall clock. It does not share the video's decoding path either:
-            // the picture is an explicit chain, not a playbin, because a
-            // playbin's buffering queue stalls this board's V4L2 decoder.
-            GstElement *aplay = gst_element_factory_make("playbin", "aplay");
-            g_object_set(aplay, "uri", m_audioUrl.toUtf8().constData(),
-                         "audio-sink",
-                         gst_parse_bin_from_description(
-                             audioSinkDescription().toUtf8().constData(), TRUE, nullptr),
-                         nullptr);
-            g_signal_connect(aplay, "source-setup", G_CALLBACK(onSourceSetup), nullptr);
-            gst_bin_add(GST_BIN(m_pipeline), aplay);
-            gst_element_sync_state_with_parent(aplay);
-            m_audioPlay = aplay;
+            // === AUDIO: an explicit chain, built like the picture ===
+            // The sound is fetched and decoded here instead of through a
+            // playbin. A playbin buffers its HTTP stream in a queue of its own
+            // and reports that buffering to the pipeline it lives in: whenever
+            // the audio fell behind, the whole pipeline - the picture included -
+            // was held back with it, which on the board showed as a steady 30
+            // fps dropping to 0 fps for seconds at a time (YTGST_DEBUG_FPS=1).
+            // souphttpsrc and decodebin keep no such queue. This is also the
+            // shape of the board's youtube-play.sh reference pipeline, which
+            // plays the same streams without a stumble.
+            //
+            // Both branches are in the one pipeline, so they share a clock, a
+            // base time and a set of seeks: pause, rate and seeking need no
+            // special care.
+            const bool audioHls = m_audioProtocol.startsWith(QLatin1String("m3u8"));
+            GstElement *abin = gst_bin_new("aplay");
+            GstElement *asrc = gst_element_factory_make("souphttpsrc", "asrc");
+            // A playlist is unwrapped by hlsdemux first; decodebin then
+            // recognizes whatever the segments hold (MPEG-TS or fragmented
+            // mp4) and autoplugs the demuxer that fits. A plain mp4/m4a URL
+            // goes straight into decodebin.
+            GstElement *ahls = audioHls ? gst_element_factory_make("hlsdemux", "ahls")
+                                        : nullptr;
+            GstElement *aqueue = gst_element_factory_make("queue", "aqueue");
+            GstElement *adecode = gst_element_factory_make("decodebin", "adecode");
+            GstElement *aconvert = gst_element_factory_make("audioconvert", "aconvert");
+            GstElement *aresample = gst_element_factory_make("audioresample", "aresample");
+            GstElement *acaps = gst_element_factory_make("capsfilter", "acaps");
+            GstElement *avolume = gst_element_factory_make("volume", "avolume");
+            GstElement *asink = gst_parse_bin_from_description(
+                audioSinkDescription().toUtf8().constData(), TRUE, nullptr);
+            if (!asrc || (audioHls && !ahls) || !aqueue || !adecode || !aconvert
+                || !aresample || !acaps || !avolume || !asink) {
+                emit errorOccurred(QStringLiteral("Could not build the audio pipeline"));
+            } else {
+                // The sound server owns the HDMI device at 48 kHz, 16 bit
+                // stereo: hand it exactly that, and it never has to resample.
+                GstCaps *audioCaps = gst_caps_new_simple("audio/x-raw",
+                                                         "format", G_TYPE_STRING, "S16LE",
+                                                         "rate", G_TYPE_INT, 48000,
+                                                         "channels", G_TYPE_INT, 2,
+                                                         nullptr);
+                g_object_set(acaps, "caps", audioCaps, nullptr);
+                gst_caps_unref(audioCaps);
+
+                // A few seconds of slack ahead of the decoder, so a hiccup in
+                // the audio fetch stays on the audio side instead of reaching
+                // the shared clock - and with it the picture.
+                g_object_set(aqueue,
+                             "max-size-buffers", guint(0),
+                             "max-size-bytes", guint(0),
+                             "max-size-time", guint64(5) * GST_SECOND,
+                             nullptr);
+
+                g_object_set(asrc, "location", m_audioUrl.toUtf8().constData(),
+                             "user-agent",
+                             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                             "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                             nullptr);
+
+                gst_bin_add_many(GST_BIN(abin), asrc, aqueue, adecode, aconvert,
+                                 aresample, acaps, avolume, asink, nullptr);
+                if (ahls)
+                    gst_bin_add(GST_BIN(abin), ahls);
+
+                bool audioLinked = gst_element_link(aconvert, aresample)
+                    && gst_element_link(aresample, acaps)
+                    && gst_element_link(acaps, avolume)
+                    && gst_element_link(avolume, asink);
+                if (ahls) {
+                    // hlsdemux exposes its pad once the playlist has been read.
+                    audioLinked = audioLinked && gst_element_link(asrc, ahls);
+                    g_signal_connect(ahls, "pad-added", G_CALLBACK(onHlsdemuxPadAdded),
+                                     aqueue);
+                } else {
+                    audioLinked = audioLinked && gst_element_link(asrc, aqueue);
+                }
+                audioLinked = audioLinked && gst_element_link(aqueue, adecode);
+                // decodebin autoplugs a demuxer and a decoder and hands the
+                // decoded audio over on a pad of its own.
+                g_signal_connect(adecode, "pad-added", G_CALLBACK(onDecodebinPadAdded),
+                                 aconvert);
+                if (!audioLinked) {
+                    emit errorOccurred(QStringLiteral("Could not link the audio pipeline"));
+                } else {
+                    gst_bin_add(GST_BIN(m_pipeline), abin);
+                    gst_element_sync_state_with_parent(abin);
+                    // Kept so applyVolume() can set the level and so a failure
+                    // that comes from the audio side can be told apart from one
+                    // that should stop playback.
+                    if (m_audioVolume)
+                        gst_object_unref(m_audioVolume);
+                    m_audioVolume = GST_ELEMENT(gst_object_ref(avolume));
+                    m_audioPlay = abin;
+                }
+            }
         }
     }
 
@@ -1639,6 +1707,10 @@ void Player::disposePipeline()
         m_pipeline = nullptr;
     }
     m_audioPlay = nullptr;
+    if (m_audioVolume) {
+        gst_object_unref(m_audioVolume);
+        m_audioVolume = nullptr;
+    }
     if (m_playing) {
         m_playing = false;
         emit playingChanged();

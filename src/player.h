@@ -154,10 +154,13 @@ private:
     // start playback again after it has been stopped (EOS, error, or the video
     // window being closed).
     QString m_videoId;
-    // The audio playbin inside m_pipeline (owned by it). Kept so a failure that
+    // The audio branch inside m_pipeline (owned by it). Kept so a failure that
     // comes from the audio side can be told apart from one that should stop
     // playback.
     GstElement *m_audioPlay = nullptr;
+    // The "volume" element of the audio branch (owned by m_pipeline): the level
+    // and the mute state are set there.
+    GstElement *m_audioVolume = nullptr;
     // Frame counter for YTGST_DEBUG_FPS=1: how many buffers the video sink
     // actually consumed, so a sink that cannot keep up can be told apart from
     // a source that cannot deliver.
@@ -175,6 +178,7 @@ private:
     QString m_videoUrl;
     QString m_videoProtocol;
     QString m_audioUrl;
+    QString m_audioProtocol;
     qint64 m_duration = 0;
     qint64 m_position = 0;
     double m_rate = 1.0;
