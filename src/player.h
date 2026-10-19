@@ -6,8 +6,6 @@
 #include <QList>
 #include <QObject>
 #include <QProcess>
-#include <QQuickItem>
-#include <QQuickWindow>
 #include <QString>
 #include <QVariantList>
 #include <QtQml/qqml.h>
@@ -31,12 +29,6 @@ class Player : public QObject
 {
     Q_OBJECT
     QML_ELEMENT
-    Q_PROPERTY(QQuickItem *videoItem WRITE setVideoItem)
-    // Name of the Wayland socket of YtGst's own compositor (see
-    // PlayerWindow.qml). When it is set, waylandsink is the video sink and
-    // draws into that compositor, which shows the picture inside the player
-    // window. Empty = draw into the QML scene graph with qml6glsink.
-    Q_PROPERTY(QString sinkDisplay READ sinkDisplay WRITE setSinkDisplay)
     Q_PROPERTY(bool playing READ playing NOTIFY playingChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(QString title READ title WRITE setTitle NOTIFY titleChanged)
@@ -57,12 +49,6 @@ class Player : public QObject
 public:
     explicit Player(QObject *parent = nullptr);
     ~Player() override;
-
-    void setVideoItem(QQuickItem *item);
-    QQuickItem *videoItem() const { return m_item; }
-
-    QString sinkDisplay() const { return m_sinkDisplay; }
-    void setSinkDisplay(const QString &display);
 
     bool playing() const { return m_playing; }
     bool loading() const { return m_loading; }
@@ -138,9 +124,6 @@ private:
     // comes from the audio side can be told apart from one that should stop
     // playback.
     GstElement *m_audioPlay = nullptr;
-    QQuickItem *m_item = nullptr;
-    // Wayland socket name of YtGst's own compositor (empty = qml6glsink).
-    QString m_sinkDisplay;
     // Frame counter for YTGST_DEBUG_FPS=1: how many buffers the video sink
     // actually consumed, so a sink that cannot keep up can be told apart from
     // a source that cannot deliver.

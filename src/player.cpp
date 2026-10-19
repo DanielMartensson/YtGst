@@ -233,46 +233,6 @@ static void onDemuxPadAdded(GstElement *, GstPad *pad, gpointer userData)
 
 // gst_bin_get_by_name() only looks at direct children; the video sink chain is
 // a bin of its own, so its elements have to be searched recursively.
-static GstElement *findElementByName(GstElement *root, const char *name)
-{
-    GstIterator *iterator = gst_bin_iterate_recurse(GST_BIN(root));
-    GValue item = G_VALUE_INIT;
-    GstElement *found = nullptr;
-    while (!found && gst_iterator_next(iterator, &item) == GST_ITERATOR_OK) {
-        GstElement *element = GST_ELEMENT(g_value_get_object(&item));
-        if (g_strcmp0(GST_ELEMENT_NAME(element), name) == 0)
-            found = GST_ELEMENT(gst_object_ref(element));
-        g_value_reset(&item);
-    }
-    g_value_unset(&item);
-    gst_iterator_free(iterator);
-    return found;
-}
-
-class SetPlaying : public QRunnable
-{
-public:
-    explicit SetPlaying(GstElement *pipeline)
-        : m_pipeline(pipeline ? (GstElement *)gst_object_ref(pipeline) : nullptr)
-    {
-    }
-
-    ~SetPlaying() override
-    {
-        if (m_pipeline)
-            gst_object_unref(m_pipeline);
-    }
-
-    void run() override
-    {
-        if (m_pipeline)
-            gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
-    }
-
-private:
-    GstElement *m_pipeline = nullptr;
-};
-
 Player::Player(QObject *parent)
     : QObject(parent)
 {
@@ -434,16 +394,6 @@ void Player::setTitle(const QString &title)
         return;
     m_title = title;
     emit titleChanged();
-}
-
-void Player::setVideoItem(QQuickItem *item)
-{
-    m_item = item;
-}
-
-void Player::setSinkDisplay(const QString &display)
-{
-    m_sinkDisplay = display;
 }
 
 void Player::play(const QString &videoId)
@@ -1215,10 +1165,6 @@ static QString audioSinkDescription()
 
 void Player::buildPipeline()
 {
-    if (m_item == nullptr && m_sinkDisplay.isEmpty()) {
-        emit errorOccurred(QStringLiteral("Video surface is not connected"));
-        return;
-    }
     if (m_videoUrl.isEmpty()) {
         emit errorOccurred(QStringLiteral("No streams found for this video"));
         return;
@@ -1241,24 +1187,16 @@ void Player::buildPipeline()
     // inside a bin (it logs "Delayed linking failed" and no frame ever reaches
     // the sink). The dynamic pads are linked in onHlsdemuxPadAdded() and
     // onDemuxPadAdded().
+    //
+    // The sink is waylandsink (non-fullscreen): it opens its own Weston window
+    // - movable and resizable via the decorations - and hands the decoder's
+    // dmabuf straight to the session display (WAYLAND_DISPLAY / XDG_RUNTIME_DIR
+    // inherited from the launcher). The control panel is a separate window
+    // (PlayerWindow.qml); both windows belong to this process, so closing the
+    // panel stops the pipeline and takes the video window with it.
     QString videoSinkDescription = QStringLiteral(YTGST_VIDEO_SINK);
-    if (videoSinkDescription.isEmpty()) {
-        if (m_sinkDisplay.isEmpty()) {
-            // No compositor of our own: upload the decoder's frames into the
-            // QML scene graph and let qml6glsink draw them as a texture there.
-            videoSinkDescription = QStringLiteral(
-                "glupload ! glcolorconvert ! capsfilter "
-                "caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" "
-                "! qml6glsink name=gsink");
-        } else {
-            // PlayerWindow.qml runs a Wayland compositor of its own (see
-            // sinkDisplay). waylandsink hands the decoder's dmabuf straight to
-            // it, the way it hands it to Weston, and the compositor draws the
-            // surface inside the player window through a ShellSurfaceItem:
-            // no copy through system memory and no window of its own.
-            videoSinkDescription = QStringLiteral("waylandsink name=gsink");
-        }
-    }
+    if (videoSinkDescription.isEmpty())
+        videoSinkDescription = QStringLiteral("waylandsink name=gsink");
 
     // YTGST_VIDEO_SINK=<gst description> replaces the video sink chain, so the
     // sinks can be compared on a board without rebuilding (for example
@@ -1280,12 +1218,16 @@ void Player::buildPipeline()
     GstElement *vsrc = gst_element_factory_make("souphttpsrc", "vsrc");
     GstElement *vdemux = gst_element_factory_make(hls ? "hlsdemux" : "qtdemux", "vdemux");
     GstElement *vtsdemux = hls ? gst_element_factory_make("tsdemux", "vtsdemux") : nullptr;
+    // The queue between the demux and the parser matches youtube-play.sh; it
+    // gives the decoder a bounded, back-pressured buffer so the V4L2 stateless
+    // decoder is never starved or flooded.
+    GstElement *vqueue = gst_element_factory_make("queue", "vqueue");
     GstElement *vparse = gst_element_factory_make("h264parse", "vparse");
     GstElement *vdecoder = gst_element_factory_make(videoDecoder.toUtf8().constData(),
                                                     "vdecoder");
     GstElement *vsink = gst_parse_bin_from_description(videoSinkDescription.toUtf8().constData(),
                                                        TRUE, nullptr);
-    if (!vsrc || !vdemux || (hls && !vtsdemux) || !vparse || !vdecoder || !vsink) {
+    if (!vsrc || !vdemux || (hls && !vtsdemux) || !vqueue || !vparse || !vdecoder || !vsink) {
         emit errorOccurred(QStringLiteral("Could not build the video pipeline"));
         return;
     }
@@ -1300,6 +1242,7 @@ void Player::buildPipeline()
     gst_bin_add(GST_BIN(vplay), vdemux);
     if (vtsdemux)
         gst_bin_add(GST_BIN(vplay), vtsdemux);
+    gst_bin_add(GST_BIN(vplay), vqueue);
     gst_bin_add(GST_BIN(vplay), vparse);
     gst_bin_add(GST_BIN(vplay), vdecoder);
     gst_bin_add(GST_BIN(vplay), vsink);
@@ -1307,13 +1250,13 @@ void Player::buildPipeline()
     // h264parse, the decoder and the sink have static pads and are linked right
     // away; the demuxers are linked when they announce their pads.
     bool linked = gst_element_link(vsrc, vdemux)
-        && gst_element_link(vparse, vdecoder)
+        && gst_element_link(vqueue, vparse)
         && gst_element_link(vdecoder, vsink);
     if (vtsdemux) {
         g_signal_connect(vdemux, "pad-added", G_CALLBACK(onHlsdemuxPadAdded), vtsdemux);
-        g_signal_connect(vtsdemux, "pad-added", G_CALLBACK(onDemuxPadAdded), vparse);
+        g_signal_connect(vtsdemux, "pad-added", G_CALLBACK(onDemuxPadAdded), vqueue);
     } else {
-        g_signal_connect(vdemux, "pad-added", G_CALLBACK(onDemuxPadAdded), vparse);
+        g_signal_connect(vdemux, "pad-added", G_CALLBACK(onDemuxPadAdded), vqueue);
     }
     if (!linked) {
         emit errorOccurred(QStringLiteral("Could not link the video pipeline"));
@@ -1345,23 +1288,6 @@ void Player::buildPipeline()
         }
     }
 
-    // The named element at the end of the chain is either the QML sink (which
-    // draws into the QML item) or waylandsink (which draws into the socket of
-    // the compositor that window runs).
-    GstElement *gsink = findElementByName(vbin, "gsink");
-    bool usesQmlSink = false;
-    if (gsink) {
-        GstElementFactory *factory = gst_element_get_factory(gsink);
-        const gchar *factoryName = factory
-            ? gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)) : nullptr;
-        usesQmlSink = g_strcmp0(factoryName, "qml6glsink") == 0;
-        if (usesQmlSink && m_item)
-            g_object_set(gsink, "widget", m_item, nullptr);
-        else if (!m_sinkDisplay.isEmpty() && g_strcmp0(factoryName, "waylandsink") == 0)
-            g_object_set(gsink, "display", m_sinkDisplay.toUtf8().constData(), nullptr);
-        gst_object_unref(gsink);
-    }
-
     attachSinkProbe(vbin);
 
     applyVolume();
@@ -1370,30 +1296,21 @@ void Player::buildPipeline()
     g_signal_connect(gst_element_get_bus(m_pipeline), "message",
                      G_CALLBACK(onBusMessage), this);
 
-    // qml6glsink has to start from a scene graph update, so that the GL context
-    // that is active when the pipeline starts is the PlayerWindow's (otherwise
-    // that sink draws in whichever context rendered last).
-    QQuickWindow *win = m_item ? m_item->window() : nullptr;
-
-    if (usesQmlSink && win) {
-        win->update();
-        win->scheduleRenderJob(new SetPlaying(m_pipeline), QQuickWindow::BeforeSynchronizingStage);
-    } else {
-        // Every other sink starts on a thread of its own. The player window
-        // runs a Wayland compositor and this thread is the one that drives it;
-        // waylandsink talks to that compositor while it changes state (it waits
-        // for the compositor to configure its surface before it prerolls), so
-        // setting the state from here would leave this thread waiting for a
-        // compositor that only this thread can run - the pipeline would never
-        // reach PLAYING and neither the picture nor the sound would come.
-        GstElement *pipeline = GST_ELEMENT(gst_object_ref(m_pipeline));
-        QThread *starter = QThread::create([pipeline]() {
-            gst_element_set_state(pipeline, GST_STATE_PLAYING);
-            gst_object_unref(pipeline);
-        });
-        connect(starter, &QThread::finished, starter, &QObject::deleteLater);
-        starter->start();
-    }
+    // The pipeline must be started from a thread other than the GUI thread.
+    // gst_element_set_state(PLAYING) blocks until the sink has prerolled;
+    // waylandsink does that by asking Weston to configure its surface, and the
+    // configure arrives as a Wayland message that only the GUI event loop can
+    // deliver. If the state change ran on the GUI thread, the event loop would
+    // be blocked in the very call that is waiting for that message - a deadlock
+    // that leaves neither picture nor sound. A helper thread drives the state
+    // change while the event loop stays free to service Weston.
+    GstElement *pipeline = GST_ELEMENT(gst_object_ref(m_pipeline));
+    QThread *starter = QThread::create([pipeline]() {
+        gst_element_set_state(pipeline, GST_STATE_PLAYING);
+        gst_object_unref(pipeline);
+    });
+    connect(starter, &QThread::finished, starter, &QObject::deleteLater);
+    starter->start();
 
     m_duration = 0;
     m_position = 0;

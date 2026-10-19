@@ -6,10 +6,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-# WaylandCompositor: the video sink is drawn inside the player window through a
-# Wayland compositor of our own (see PlayerWindow.qml), so waylandsink can be
-# used for the picture without opening a window of its own.
-find_package(Qt6 6.8 REQUIRED COMPONENTS Quick Network Widgets WaylandCompositor)
+# The video is drawn by waylandsink in its own Weston window; the control
+# panel is a separate plain window (see PlayerWindow.qml). The scene graph
+# renders with the RHI chosen in main.cpp (Vulkan by default, OpenGL fallback).
+find_package(Qt6 6.8 REQUIRED COMPONENTS Quick Network Widgets)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-gl-1.0)
@@ -46,10 +46,9 @@ message(STATUS "Audio decoder: ${YTGST_AUDIO_DECODER}")
 set(YTGST_AUDIO_SINK "" CACHE STRING "GStreamer audio sink (empty = auto)")
 message(STATUS "Audio sink: ${YTGST_AUDIO_SINK}")
 
-# Video sink chain. Empty = the embedded qml6glsink chain that draws into the
-# QML scene graph (glupload ! glcolorconvert ! capsfilter ! qml6glsink).
-# Example: waylandsink, to draw through a window of its own.
-set(YTGST_VIDEO_SINK "" CACHE STRING "GStreamer video sink chain (empty = qml6glsink)")
+# Video sink chain. Empty = waylandsink name=gsink (Weston window).
+# Example: v4l2slh264dec ! glupload ! glcolorconvert ! capsfilter ! qml6glsink.
+set(YTGST_VIDEO_SINK "" CACHE STRING "GStreamer video sink chain (empty = waylandsink)")
 message(STATUS "Video sink: ${YTGST_VIDEO_SINK}")
 
 # VA-API driver set in LIBVA_DRIVER_NAME. Empty = automatic.
@@ -85,7 +84,7 @@ target_sources(ytgst PRIVATE
 )
 
 target_link_libraries(ytgst PRIVATE Qt6::Quick Qt6::Network Qt6::Widgets
-    Qt6::WaylandCompositor PkgConfig::GST)
+    PkgConfig::GST)
 
 # Pass the configurable values in as compile flags (-D...).
 target_compile_definitions(ytgst PRIVATE

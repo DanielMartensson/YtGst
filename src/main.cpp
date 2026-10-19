@@ -12,10 +12,15 @@
 #include <QTimer>
 #include <QSGRendererInterface>
 #include <QRegularExpression>
+#include <QVulkanInstance>
+#include <QVersionNumber>
 
 #include <cstring>
 #include <clocale>
 #include <langinfo.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vulkan/vulkan.h>
 
 #include <gst/gst.h>
 
@@ -23,13 +28,201 @@
 #define GL_RENDERER 0x1F01
 #endif
 
+// NOTE: The target's Qt 6.8 (OpenSTLinux) is a trimmed/renamed Qt build.
+// This code must therefore avoid the standard Qt 6 APIs that are missing
+// there: QString::leftOfLastPathSeparator()/leftPart(),
+// QIODevice::AppendOnly, QFile::openStatus()/QFile::Ok, and
+// QQmlEngine::addContextProperty(). Context properties are set through
+// QQmlEngine::rootContext()->setContextProperty() instead.
+
+static QString g_graphicsApi = QStringLiteral("OpenGL");
+static QString g_graphicsReason = {};
+
+static QByteArray rendererFromEnv()
+{
+    return qgetenv("YTGST_RENDERER").toLower();
+}
+
+// Reports true when an unstable Vulkan ICD (nouveau/hasvk) is installed. Those
+// ICDs load but produce a broken rendering path, so we keep them out and fall
+// back to OpenGL instead.
+static bool unstableVulkanIcdPresent()
+{
+    const QDir::Filters filters = QDir::Files;
+    const QStringList filter({QStringLiteral("*.json")});
+    const char *const icdDirs[] = {
+        "/usr/local/share/vulkan/icd.d",
+        "/usr/share/vulkan/icd.d",
+        "/etc/vulkan/icd.d",
+    };
+    const char *const unstableNames[] = { "nouveau", "hasvk" };
+
+    const QString envIcds = QString::fromUtf8(qgetenv("VK_ICD_FILENAMES"));
+    for (const QString &icd : envIcds.split(QLatin1Char(':'), Qt::SkipEmptyParts)) {
+        const QString name = QFileInfo(icd).fileName();
+        for (const char *u : unstableNames)
+            if (name.contains(QLatin1String(u), Qt::CaseInsensitive))
+                return true;
+    }
+
+    for (const char *dir : icdDirs) {
+        const QDir d{QLatin1String(dir)};
+        if (!d.exists())
+            continue;
+        const QStringList icds = d.entryList(filter, filters);
+        for (const QString &name : icds)
+            for (const char *u : unstableNames)
+                if (name.contains(QLatin1String(u), Qt::CaseInsensitive))
+                    return true;
+    }
+    return false;
+}
+
+// Enumerates the physical devices and reports true when a real GPU (not a CPU
+// type, not llvmpipe, not NVK/nouveau) is present.
+static bool vulkanHardwareAvailable(QVulkanInstance &instance)
+{
+    PFN_vkEnumeratePhysicalDevices enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        instance.getInstanceProcAddr("vkEnumeratePhysicalDevices"));
+    PFN_vkGetPhysicalDeviceProperties getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        instance.getInstanceProcAddr("vkGetPhysicalDeviceProperties"));
+    if (!enumerate || !getProperties)
+        return false;
+
+    uint32_t count = 0;
+    if (enumerate(instance.vkInstance(), &count, nullptr) != VK_SUCCESS || count == 0)
+        return false;
+
+    QVarLengthArray<VkPhysicalDevice, 8> devices(count);
+    if (enumerate(instance.vkInstance(), &count, devices.data()) != VK_SUCCESS)
+        return false;
+
+    bool sawHardware = false;
+    for (VkPhysicalDevice device : devices) {
+        VkPhysicalDeviceProperties props{};
+        getProperties(device, &props);
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)
+            continue;
+        const QByteArray name = QByteArray(props.deviceName);
+        if (name.contains("llvmpipe"))
+            continue;
+        if (name.contains("NVK") || name.contains("nouveau"))
+            return false;
+        sawHardware = true;
+    }
+    return sawHardware;
+}
+
+// Requires a 1.2+ instance. The legacy GCNANO/VeriSilicon ICD on the Weston
+// target reports only loader interface v2 and does not expose
+// vkEnumerateInstanceVersion; the loader then falls back to a 1.0-level
+// instance. Requiring 1.2+ keeps that broken probe path out and enables real
+// Vulkan once a fully conformant ICD is present. The target Vulkan headers
+// declare vkEnumerateInstanceVersion with a single uint32_t* argument and
+// define VK_API_VERSION_1_2.
+static bool vulkanInstanceUsable(QVulkanInstance &instance)
+{
+    PFN_vkEnumerateInstanceVersion enumerate = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+        instance.getInstanceProcAddr("vkEnumerateInstanceVersion"));
+    if (!enumerate)
+        return false;
+
+    uint32_t supportedVersion = 0;
+    if (enumerate(&supportedVersion) != VK_SUCCESS)
+        return false;
+    return supportedVersion >= VK_API_VERSION_1_2;
+}
+
+// All of Qt's platform plugins can create a QPlatformIntegration, but only some
+// can also create a platform *Vulkan* instance (createPlatformVulkanInstance()).
+// On the STM32MP2 (OpenSTLinux) image the default Wayland plugin,
+// libqwayland-generic.so, cannot - so QVulkanInstance::create() fails and Qt
+// Quick silently falls back to OpenGL even though the VeriSilicon GPU exposes
+// Vulkan. Its sibling libqwayland-egl.so does implement it.
+//
+// Prefer the EGL variant when we are on Wayland and the user has not chosen a
+// platform themselves. QT_QPA_PLATFORM still wins.
+static void preferVulkanCapablePlatform()
+{
+    if (!qgetenv("QT_QPA_PLATFORM").isEmpty())
+        return;
+    if (qgetenv("WAYLAND_DISPLAY").isEmpty() && qgetenv("WAYLAND_SOCKET").isEmpty())
+        return;
+
+    // Deliberately avoid QLibraryInfo here (the target Qt build is trimmed) and
+    // this has to run before QGuiApplication exists. Qt's own plugin search
+    // paths plus the well-known target locations are enough.
+    QStringList pluginDirs = QCoreApplication::libraryPaths();
+    pluginDirs << QStringLiteral("/usr/lib/plugins")
+               << QStringLiteral("/usr/lib/qt6/plugins")
+               << QStringLiteral("/usr/lib/x86_64-linux-gnu/qt6/plugins");
+    for (const QString &dir : pluginDirs) {
+        if (QFile::exists(dir + QStringLiteral("/platforms/libqwayland-egl.so"))) {
+            qputenv("QT_QPA_PLATFORM", "wayland-egl");
+            qInfo("YtGst: platform plugin wayland-egl (can create a Vulkan instance)");
+            return;
+        }
+    }
+}
+
 // Picks the scene graph's RHI graphics API before the application is
-// constructed. OpenGLRhi is the only backend YtGst uses – it is adapted for
-// OpenGL and OpenGL ES (as used on the STM32MP257F), which is what the
-// qml6glsink video sink requires to draw GStreamer frames in the scene graph.
+// constructed. Vulkan is used when a supported GPU is present and the Vulkan
+// instance reports 1.2+; otherwise we fall back to OpenGL (GCNANO EGL). The
+// video itself is drawn by waylandsink in its own Weston window, so the RHI
+// only affects the control panel's scene graph.
 static void pickGraphicsApi()
 {
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+    const QByteArray forced = rendererFromEnv();
+
+    if (forced == "opengl") {
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+        g_graphicsApi = QStringLiteral("OpenGL");
+        g_graphicsReason = QStringLiteral("forced via YTGST_RENDERER");
+        qInfo("YtGst: using OpenGL renderer (forced)");
+        return;
+    }
+
+    if (forced != "vulkan" && unstableVulkanIcdPresent()) {
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+        g_graphicsApi = QStringLiteral("OpenGL");
+        g_graphicsReason = QStringLiteral("unstable Vulkan drivers detected (nouveau/hasvk)");
+        qInfo("YtGst: using OpenGL renderer (unstable Vulkan drivers detected)");
+        return;
+    }
+
+    QVulkanInstance probe;
+    // The VeriSilicon ICD on the target refuses a VkApplicationInfo whose
+    // apiVersion is 0 ("value of 0 which is not permitted") and prints an ERROR
+    // line about it before the window exists. Qt leaves the field at 0 unless a
+    // version is set, so ask for the lowest version Vulkan defines - this probe
+    // only enumerates devices, it never creates one.
+    probe.setApiVersion(QVersionNumber(1, 0));
+    const bool instanceCreated = probe.create();
+    const bool hardwareSuitable = instanceCreated
+        && vulkanHardwareAvailable(probe);
+    const bool instanceUsable = hardwareSuitable
+        && vulkanInstanceUsable(probe);
+    const bool suitable = instanceUsable;
+
+    const QString vulkanFallbackReason =
+        !instanceCreated
+            ? QStringLiteral("could not create a Vulkan instance")
+            : !hardwareSuitable
+                ? QStringLiteral("no supported Vulkan GPU")
+                : QStringLiteral("Vulkan instance below 1.2 (ICD does not expose vkEnumerateInstanceVersion)");
+
+    if (forced != "vulkan" && !suitable) {
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+        g_graphicsApi = QStringLiteral("OpenGL");
+        g_graphicsReason = vulkanFallbackReason;
+        qInfo("YtGst: using OpenGL renderer (%1)", vulkanFallbackReason);
+        return;
+    }
+
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
+    g_graphicsApi = QStringLiteral("Vulkan");
+    g_graphicsReason.clear();
+    qInfo("YtGst: using Vulkan renderer");
 }
 
 // Starts the player as a separate process with its own QQuickWindow/GL context.
@@ -77,7 +270,7 @@ static QString currentRenderer()
 }
 
 // Collects startup problems that prevent GPU acceleration:
-// missing hardware decoder, missing qml6glsink or software rendering.
+// missing hardware decoder, missing waylandsink or software rendering.
 static QStringList startupProblems()
 {
     QStringList problems;
@@ -101,12 +294,12 @@ static QStringList startupProblems()
         }
     }
 
-    GstPluginFeature *sink = gst_registry_lookup_feature(registry, "qml6glsink");
+    GstPluginFeature *sink = gst_registry_lookup_feature(registry, "waylandsink");
     if (sink) {
         gst_object_unref(sink);
     } else {
         problems << QStringLiteral(
-            "qml6glsink is missing – install gstreamer1.0-qt6.");
+            "waylandsink is missing – install gstreamer1.0-plugins-good.");
     }
 
     const QString renderer = currentRenderer();
@@ -181,10 +374,14 @@ static void preferUtf8CharacterType()
 
 int main(int argc, char *argv[])
 {
+    // The platform plugin must be chosen before the application is constructed
+    // (it decides how the Vulkan instance is created).
+    preferVulkanCapablePlatform();
     preferUtf8CharacterType();
 
-    // qml6glsink must share an OpenGL context with the Qt scene graph, so the
-    // scene graph can draw the GStreamer GLMemory textures in the PlayerWindow.
+    // The scene graph (the control panel) renders with the chosen RHI. The
+    // video is drawn by waylandsink in its own Weston window, so no OpenGL
+    // context sharing is required for the picture.
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
     // The RHI backend must be picked before the application is constructed.
@@ -216,15 +413,6 @@ int main(int argc, char *argv[])
 #ifdef YTGST_AUDIO_DECODER
     raiseDecoderRank(QByteArrayLiteral(YTGST_AUDIO_DECODER));
 #endif
-
-    // The qml6glsink plugin MUST be loaded before the QML engine is created,
-    // to register the GstGLQt6VideoItem type in QML.
-    GstElement *sink = gst_element_factory_make("qml6glsink", nullptr);
-    if (!sink) {
-        qWarning("qml6glsink is missing – install gstreamer1.0-qt6");
-    } else {
-        gst_object_unref(sink);
-    }
 
     QApplication app(argc, argv);
 

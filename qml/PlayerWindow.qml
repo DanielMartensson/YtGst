@@ -1,17 +1,14 @@
 import QtQuick
 import QtQuick.Controls
-import QtWayland.Compositor
-import QtWayland.Compositor.XdgShell
 import Ytgst
-import org.freedesktop.gstreamer.Qt6GLVideoItem 1.0
 
 Window {
     id: playerWindow
 
-    width: 960
-    height: 540
+    width: 800
+    height: 140
     minimumWidth: 640
-    minimumHeight: 360
+    minimumHeight: 140
     visible: false
     color: "#0b0b0c"
     title: videoTitle.length > 0 ? videoTitle : qsTr("YtGst Player")
@@ -20,15 +17,9 @@ Window {
     property string videoTitle: ""
     property bool standalone: false
 
-    // Controls appear on mouse movement and fade out after 5 s without motion.
-    property bool controlsVisible: true
-    readonly property bool controlsShown: controlsVisible || !player.playing
-
-    function wakeControls() {
-        controlsVisible = true;
-        hideTimer.restart();
-    }
-
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
     function formatTime(ms) {
         if (!isFinite(ms) || ms < 0)
             ms = 0;
@@ -49,228 +40,87 @@ Window {
         return height > 0 ? (height + "p") : qsTr("Auto");
     }
 
-    readonly property bool fullscreen: visibility === Window.FullScreen
-
-    // The compositor does not hand the windowed size back when fullscreen is
-    // left: it answers with a 0x0 configure, which means "pick one yourself",
-    // and the window comes back at whatever size Qt was left with (very large,
-    // or very small). So remember the size the window has in windowed mode and
-    // put it back by hand, both right away and once more after the compositor
-    // has sent its own size. While that handover runs, the sizes the compositor
-    // reports must not overwrite the remembered one.
-    // A plain value, not a binding to width/height - a binding would follow the
-    // window into fullscreen and "restore" the fullscreen size afterwards.
-    property size windowedSize: Qt.size(960, 540)
-    property bool restoringSize: false
-
-    function rememberWindowedSize() {
-        // Sizes under the window's minimum are not sizes the window ever had on
-        // purpose (a 0x0 configure, or the moment fullscreen is entered).
-        if (visibility === Window.Windowed && !restoringSize
-                && width >= minimumWidth && height >= minimumHeight)
-            windowedSize = Qt.size(width, height);
-    }
-
-    onWidthChanged: rememberWindowedSize()
-    onHeightChanged: rememberWindowedSize()
-
-    function restoreWindowedSize() {
-        if (windowedSize.width < minimumWidth || windowedSize.height < minimumHeight)
-            return;
-        // Unconditional: leaving fullscreen leaves the window at the fullscreen
-        // size, which is larger than the remembered one.
-        if (width !== windowedSize.width)
-            width = windowedSize.width;
-        if (height !== windowedSize.height)
-            height = windowedSize.height;
-    }
-
-    function leaveFullscreen() {
-        restoringSize = true;
-        visibility = Window.Windowed;
-        restoreWindowedSize();
-        sizeRestoreTimer.restart();
-    }
-
-    function toggleFullscreen() {
-        if (fullscreen) {
-            leaveFullscreen();
-        } else {
-            if (width >= minimumWidth && height >= minimumHeight)
-                windowedSize = Qt.size(width, height);
-            visibility = Window.FullScreen;
-        }
-    }
-
-    // Second chance once the compositor's own resize has arrived.
+    // ------------------------------------------------------------------
+    // Raise over the video window. Weston stacks newer windows on top; the
+    // video window (waylandsink) is created after this panel, so it lands on
+    // top of us. Hiding and re-showing the panel forces a new configure that
+    // puts it back over the video window.
+    // ------------------------------------------------------------------
     Timer {
-        id: sizeRestoreTimer
-        interval: 600
+        id: raiseHideTimer
+        interval: 500
         onTriggered: {
-            playerWindow.restoreWindowedSize();
-            playerWindow.restoringSize = false;
+            playerWindow.visible = false;
+            reShowTimer.restart();
         }
     }
-
-    onVisibilityChanged: {
-        // Fullscreen can also be left by the compositor (a keybinding of its
-        // own), not only through toggleFullscreen(), so watch the state too.
-        if (visibility === Window.Windowed && !restoringSize) {
-            restoringSize = true;
-            restoreWindowedSize();
-            sizeRestoreTimer.restart();
-        }
-    }
-
-    // === The picture =====================================================
-    // YtGst runs a Wayland compositor of its own so that the video sink can be
-    // waylandsink. That sink hands the decoded frames straight to the
-    // compositor (dmabuf, no copy through system memory), exactly as it does
-    // for Weston, and the compositor draws the resulting surface inside this
-    // window. The controls below are ordinary QML items on top of it.
-    //
-    // A fixed socket name is enough: one YtGst runs at a time, and the socket
-    // is removed again when the compositor goes down.
-    ListModel { id: videoSurfaces }
-
-    WaylandCompositor {
-        id: videoCompositor
-        socketName: "ytgst-video"
-
-        XdgShell {
-            onToplevelCreated: (toplevel, xdgSurface) => {
-                videoSurfaces.append({ shellSurface: xdgSurface });
-            }
-        }
-    }
-
-    WaylandOutput {
-        compositor: videoCompositor
-        sizeFollowsWindow: true
-        window: playerWindow
-    }
-
-    // Fallback picture: only drawn when the qml6glsink chain runs (see
-    // Player.sinkDisplay and buildPipeline()); with waylandsink the frames
-    // arrive as a surface in videoViewport below instead.
-    GstGLQt6VideoItem {
-        id: videoSurface
-        anchors.fill: parent
-        visible: videoSurfaces.count === 0
-    }
-
-    // The waylandsink surface, scaled to fill the window. The surface carries
-    // the video at its own size (1920x1080), and the item's size follows the
-    // surface, so the scale is worked out from the item's own size and stays
-    // right whatever size the window has.
-    Item {
-        id: videoViewport
-        anchors.fill: parent
-        clip: true
-
-        Repeater {
-            model: videoSurfaces
-
-            delegate: ShellSurfaceItem {
-                id: shellItem
-                shellSurface: modelData
-                focusOnClick: false
-                onSurfaceDestroyed: videoSurfaces.remove(index)
-
-                transform: Scale {
-                    origin.x: 0
-                    origin.y: 0
-                    xScale: shellItem.width > 0 ? videoViewport.width / shellItem.width : 1
-                    yScale: shellItem.height > 0 ? videoViewport.height / shellItem.height : 1
-                }
-            }
-        }
-    }
-
-    // Captures mouse hover over the whole window without stealing clicks.
-    MouseArea {
-        id: hoverArea
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.NoButton
-        onEntered: playerWindow.wakeControls()
-        onPositionChanged: playerWindow.wakeControls()
-        z: 1
-    }
-
-    // Hides the controls after 5 s without mouse movement.
     Timer {
-        id: hideTimer
-        interval: 5000
-        onTriggered: playerWindow.controlsVisible = false
+        id: reShowTimer
+        interval: 100
+        onTriggered: playerWindow.visible = true;
     }
 
-    Text {
-        id: errorLabel
-        anchors.centerIn: parent
-        visible: text.length > 0
-        color: "#e8716d"
-        font.pixelSize: 14
-        wrapMode: Text.Wrap
-        horizontalAlignment: Text.AlignHCenter
-        width: parent.width - 80
-        z: 2
-    }
-
-    // A message can be shown while playback continues (for example "no sound
-    // server for this user"), so it must not stay over the picture forever.
-    Timer {
-        id: errorClearTimer
-        interval: 8000
-        onTriggered: errorLabel.text = ""
-    }
-
+    // ------------------------------------------------------------------
+    // Player
+    // ------------------------------------------------------------------
     Player {
         id: player
-        videoItem: videoSurface
-        // The compositor above is where waylandsink draws (see buildPipeline()).
-        sinkDisplay: videoCompositor.socketName
         onErrorOccurred: (message) => {
             errorLabel.text = message;
             errorClearTimer.restart();
         }
         onPlayingChanged: {
             if (playing)
-                playerWindow.wakeControls();
-            else
-                playerWindow.controlsVisible = true;
+                raiseHideTimer.restart();
         }
     }
 
-    // YouTube-style progress bar, full width and lifted ~5 mm from the bottom.
-    Item {
-        id: progressBar
+    // ------------------------------------------------------------------
+    // Error label (shown briefly when playback has a problem)
+    // ------------------------------------------------------------------
+    Text {
+        id: errorLabel
+        anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.leftMargin: 10
-        anchors.rightMargin: 10
-        anchors.bottomMargin: 18
-        height: 26
+        anchors.topMargin: 12
+        color: "#e8716d"
+        font.pixelSize: 13
+        wrapMode: Text.Wrap
+        horizontalAlignment: Text.AlignHCenter
+        visible: text.length > 0
+        z: 5
+    }
+    Timer {
+        id: errorClearTimer
+        interval: 8000
+        onTriggered: errorLabel.text = ""
+    }
+
+    // ------------------------------------------------------------------
+    // Progress bar (always visible, seekable)
+    // ------------------------------------------------------------------
+    Item {
+        id: progressBar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.topMargin: 8
+        height: 36
         z: 3
 
-        readonly property bool active: hoverArea.containsMouse || scrubbing
+        readonly property bool active: mouseArea.containsMouse || scrubbing
         property bool scrubbing: false
         property real scrubValue: 0
         readonly property real shownPosition: scrubbing ? scrubValue : player.position
         readonly property real progress: player.duration > 0
             ? Math.max(0, Math.min(1, shownPosition / player.duration)) : 0
 
-        opacity: progressBar.scrubbing ? 1.0
-                 : (playerWindow.controlsShown ? (active ? 1.0 : 0.45) : 0.0)
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
-
         Rectangle {
             id: track
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.bottom: parent.bottom
+            anchors.verticalCenter: parent.verticalCenter
             height: progressBar.active ? 5 : 3
             radius: height / 2
             color: "#55ffffff"
@@ -305,8 +155,8 @@ Window {
             width: bubbleText.implicitWidth + 14
             height: bubbleText.implicitHeight + 8
             x: Math.max(2, Math.min(progressBar.width - width - 2, mouseArea.mouseX - width / 2))
-            anchors.bottom: track.top
-            anchors.bottomMargin: 6
+            anchors.top: track.top
+            anchors.topMargin: -16
 
             Text {
                 id: bubbleText
@@ -345,7 +195,10 @@ Window {
         }
     }
 
-    // Play/pause button (shown on hover or when the video is paused).
+    // ------------------------------------------------------------------
+    // Buttons row (always visible - no auto-hide)
+    // ------------------------------------------------------------------
+    // Play/pause
     Rectangle {
         id: playButton
         width: 40
@@ -355,20 +208,16 @@ Window {
         border.color: "#33ffffff"
         border.width: 1
         z: 3
+        anchors.top: parent.top
         anchors.left: parent.left
-        anchors.bottom: progressBar.top
+        anchors.topMargin: 52
         anchors.leftMargin: 12
-        anchors.bottomMargin: 10
-        opacity: playerWindow.controlsShown ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
 
         Canvas {
             id: playIcon
             anchors.centerIn: parent
             width: 18
             height: 18
-
             onPaint: {
                 var ctx = getContext("2d");
                 ctx.reset();
@@ -385,11 +234,10 @@ Window {
                     ctx.fill();
                 }
             }
-        }
-
-        Connections {
-            target: player
-            function onPlayingChanged() { playIcon.requestPaint(); }
+            Connections {
+                target: player
+                function onPlayingChanged() { playIcon.requestPaint(); }
+            }
         }
 
         MouseArea {
@@ -400,7 +248,7 @@ Window {
         }
     }
 
-    // Speed button with menu (0.25x–2x).
+    // Speed (0.25x-2x)
     Rectangle {
         id: speedButton
         width: 52
@@ -410,12 +258,10 @@ Window {
         border.color: "#33ffffff"
         border.width: 1
         z: 3
+        anchors.top: parent.top
         anchors.left: playButton.right
         anchors.leftMargin: 8
-        anchors.verticalCenter: playButton.verticalCenter
-        opacity: playerWindow.controlsShown ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+        anchors.topMargin: 52
 
         Text {
             anchors.centerIn: parent
@@ -437,7 +283,6 @@ Window {
             width: 140
             y: -height - 6
             x: (speedButton.width - width) / 2
-
             MenuItem { text: "0.25x"; font.bold: Math.abs(player.rate - 0.25) < 0.001; onTriggered: player.setRate(0.25) }
             MenuItem { text: "0.5x"; font.bold: Math.abs(player.rate - 0.5) < 0.001; onTriggered: player.setRate(0.5) }
             MenuItem { text: "0.75x"; font.bold: Math.abs(player.rate - 0.75) < 0.001; onTriggered: player.setRate(0.75) }
@@ -449,7 +294,7 @@ Window {
         }
     }
 
-    // Resolution button with menu (Auto + available resolutions).
+    // Resolution (Auto + available)
     Rectangle {
         id: resolutionButton
         width: Math.max(52, resolutionText.implicitWidth + 22)
@@ -459,12 +304,10 @@ Window {
         border.color: "#33ffffff"
         border.width: 1
         z: 3
+        anchors.top: parent.top
         anchors.left: speedButton.right
         anchors.leftMargin: 8
-        anchors.verticalCenter: playButton.verticalCenter
-        opacity: playerWindow.controlsShown ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+        anchors.topMargin: 52
 
         Text {
             id: resolutionText
@@ -487,7 +330,6 @@ Window {
             width: 140
             y: -height - 6
             x: (resolutionButton.width - width) / 2
-
             MenuItem {
                 // yt-dlp needs ~20 s on the STM32MP25 before the format list is
                 // in, so say that the list is coming while it is still empty.
@@ -510,7 +352,7 @@ Window {
             ? player.resolutions[0] : 0
     }
 
-    // Subtitle button (CC) with menu. Shown only if the video has tracks.
+    // Subtitle (CC) - shown only if the video has tracks
     Rectangle {
         id: subtitleButton
         width: 46
@@ -520,12 +362,10 @@ Window {
         border.color: player.subtitleLanguage.length > 0 ? "#ffffff" : "#33ffffff"
         border.width: player.subtitleLanguage.length > 0 ? 2 : 1
         z: 3
+        anchors.top: parent.top
         anchors.left: resolutionButton.right
         anchors.leftMargin: 8
-        anchors.verticalCenter: playButton.verticalCenter
-        opacity: (player.subtitleTracks.length > 0 && playerWindow.controlsShown) ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+        anchors.topMargin: 52
 
         Text {
             anchors.centerIn: parent
@@ -547,7 +387,6 @@ Window {
             width: 220
             y: -height - 6
             x: (subtitleButton.width - width) / 2
-
             MenuItem {
                 text: qsTr("Off")
                 font.bold: player.subtitleLanguage.length === 0
@@ -564,29 +403,28 @@ Window {
         }
     }
 
-    // Fullscreen button. Esc leaves fullscreen (and otherwise closes the window).
+    // Fullscreen. The video lives in its own Weston window and waylandsink's
+    // fullscreen property crashes Weston 13.0.1, so this is a no-op; the user
+    // maximises the video window via its own decorations.
     Rectangle {
         id: fullscreenButton
         width: 40
         height: 40
         radius: 20
-        color: fullscreenButtonMouse.pressed ? "#e6000000" : "#b3000000"
+        color: "#b3000000"
         border.color: "#33ffffff"
         border.width: 1
         z: 3
+        anchors.top: parent.top
         anchors.left: subtitleButton.right
         anchors.leftMargin: 8
-        anchors.verticalCenter: playButton.verticalCenter
-        opacity: playerWindow.controlsShown ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+        anchors.topMargin: 52
 
         Canvas {
             id: fullscreenIcon
             anchors.centerIn: parent
             width: 18
             height: 18
-
             onPaint: {
                 var ctx = getContext("2d");
                 ctx.reset();
@@ -596,22 +434,10 @@ Window {
                 var s = 5;
                 var w = width;
                 var h = height;
-                if (!playerWindow.fullscreen) {
-                    ctx.beginPath(); ctx.moveTo(m, m + s); ctx.lineTo(m, m); ctx.lineTo(m + s, m); ctx.stroke();
-                    ctx.beginPath(); ctx.moveTo(w - m - s, m); ctx.lineTo(w - m, m); ctx.lineTo(w - m, m + s); ctx.stroke();
-                    ctx.beginPath(); ctx.moveTo(m, h - m - s); ctx.lineTo(m, h - m); ctx.lineTo(m + s, h - m); ctx.stroke();
-                    ctx.beginPath(); ctx.moveTo(w - m - s, h - m); ctx.lineTo(w - m, h - m); ctx.lineTo(w - m, h - m - s); ctx.stroke();
-                } else {
-                    ctx.beginPath(); ctx.moveTo(m, m + s); ctx.lineTo(m + s, m + s); ctx.lineTo(m + s, m); ctx.stroke();
-                    ctx.beginPath(); ctx.moveTo(w - m, m + s); ctx.lineTo(w - m - s, m + s); ctx.lineTo(w - m - s, m); ctx.stroke();
-                    ctx.beginPath(); ctx.moveTo(m, h - m - s); ctx.lineTo(m + s, h - m - s); ctx.lineTo(m + s, h - m); ctx.stroke();
-                    ctx.beginPath(); ctx.moveTo(w - m, h - m - s); ctx.lineTo(w - m - s, h - m - s); ctx.lineTo(w - m - s, h - m); ctx.stroke();
-                }
-            }
-
-            Connections {
-                target: playerWindow
-                function onFullscreenChanged() { fullscreenIcon.requestPaint(); }
+                ctx.beginPath(); ctx.moveTo(m, m + s); ctx.lineTo(m, m); ctx.lineTo(m + s, m); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(w - m - s, m); ctx.lineTo(w - m, m); ctx.lineTo(w - m, m + s); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(m, h - m - s); ctx.lineTo(m, h - m); ctx.lineTo(m + s, h - m); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(w - m - s, h - m); ctx.lineTo(w - m, h - m); ctx.lineTo(w - m, h - m - s); ctx.stroke();
             }
         }
 
@@ -619,11 +445,13 @@ Window {
             id: fullscreenButtonMouse
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: playerWindow.toggleFullscreen()
+            onClicked: {
+                // No-op: waylandsink fullscreen crashes Weston 13.0.1.
+            }
         }
     }
 
-    // Download button. Click starts the download, click again cancels.
+    // Download (click starts, click again cancels)
     Rectangle {
         id: downloadButton
         width: 40
@@ -633,19 +461,16 @@ Window {
         border.color: player.downloading ? "#ffffff" : "#33ffffff"
         border.width: player.downloading ? 2 : 1
         z: 3
+        anchors.top: parent.top
         anchors.left: fullscreenButton.right
         anchors.leftMargin: 8
-        anchors.verticalCenter: playButton.verticalCenter
-        opacity: playerWindow.controlsShown ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+        anchors.topMargin: 52
 
         Canvas {
             id: downloadIcon
             anchors.centerIn: parent
             width: 18
             height: 18
-
             onPaint: {
                 var ctx = getContext("2d");
                 ctx.reset();
@@ -657,15 +482,11 @@ Window {
                     ctx.arc(9, 9, 7, start, start + 2 * Math.PI * Math.max(0.02, player.downloadProgress));
                     ctx.stroke();
                 } else {
-                    ctx.beginPath();
-                    ctx.moveTo(9, 2); ctx.lineTo(9, 12); ctx.stroke();
-                    ctx.beginPath();
-                    ctx.moveTo(5, 8); ctx.lineTo(9, 12); ctx.lineTo(13, 8); ctx.stroke();
-                    ctx.beginPath();
-                    ctx.moveTo(3, 15); ctx.lineTo(15, 15); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(9, 2); ctx.lineTo(9, 12); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(5, 8); ctx.lineTo(9, 12); ctx.lineTo(13, 8); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(3, 15); ctx.lineTo(15, 15); ctx.stroke();
                 }
             }
-
             Connections {
                 target: player
                 function onDownloadingChanged() { downloadIcon.requestPaint(); }
@@ -681,45 +502,19 @@ Window {
         }
     }
 
-    // Download status toast, above the download button.
-    Rectangle {
-        id: downloadToast
-        visible: player.downloadStatus.length > 0
-        color: "#cc000000"
-        radius: 6
-        border.color: "#33ffffff"
-        border.width: 1
-        z: 4
-        width: downloadToastText.implicitWidth + 20
-        height: downloadToastText.implicitHeight + 10
-        anchors.horizontalCenter: downloadButton.horizontalCenter
-        anchors.bottom: downloadButton.top
-        anchors.bottomMargin: 8
-
-        Text {
-            id: downloadToastText
-            anchors.centerIn: parent
-            color: "#ffffff"
-            font.pixelSize: 12
-            text: player.downloadStatus
-        }
-    }
-
-    // Volume control. Clicking the icon shows a vertical slider above.
+    // Volume (clicking the icon shows a vertical slider above)
     Item {
         id: volumeControl
         property bool expanded: false
 
         width: 40
         height: 40
+        z: 3
+        anchors.top: parent.top
         anchors.right: parent.right
+        anchors.topMargin: 52
         anchors.rightMargin: 12
-        anchors.verticalCenter: playButton.verticalCenter
-        opacity: playerWindow.controlsShown ? 1.0 : 0.0
-        visible: opacity > 0.01
-        Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
 
-        // Panel with vertical slider, above the button.
         Rectangle {
             id: volumePanel
             visible: volumeControl.expanded
@@ -795,7 +590,6 @@ Window {
                 anchors.centerIn: parent
                 width: 20
                 height: 20
-
                 onPaint: {
                     var ctx = getContext("2d");
                     ctx.reset();
@@ -829,7 +623,6 @@ Window {
                         }
                     }
                 }
-
                 Connections {
                     target: player
                     function onVolumeChanged() { volumeIcon.requestPaint(); }
@@ -846,32 +639,51 @@ Window {
         }
     }
 
-    // Subtitle overlay above the controls.
+    // Download status toast, above the download button
     Rectangle {
-        id: subtitleBox
-        visible: player.subtitleText.length > 0
+        id: downloadToast
+        visible: player.downloadStatus.length > 0
         color: "#cc000000"
-        radius: 4
+        radius: 6
+        border.color: "#33ffffff"
+        border.width: 1
         z: 4
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 104
-        width: subtitleText.width + 24
-        height: subtitleText.height + 12
+        width: downloadToastText.implicitWidth + 20
+        height: downloadToastText.implicitHeight + 10
+        anchors.horizontalCenter: downloadButton.horizontalCenter
+        anchors.bottom: downloadButton.top
+        anchors.bottomMargin: 8
 
         Text {
-            id: subtitleText
+            id: downloadToastText
             anchors.centerIn: parent
             color: "#ffffff"
-            font.pixelSize: 18
-            font.bold: true
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.Wrap
-            width: Math.min(implicitWidth, playerWindow.width * 0.8)
-            text: player.subtitleText
+            font.pixelSize: 12
+            text: player.downloadStatus
         }
     }
 
+    // Subtitle text (shown in the panel, since there is no video overlay)
+    Text {
+        id: subtitleText
+        visible: player.subtitleText.length > 0
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottomMargin: 10
+        color: "#ffffff"
+        font.pixelSize: 16
+        font.bold: true
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        width: parent.width - 24
+        text: player.subtitleText
+        z: 4
+    }
+
+    // ------------------------------------------------------------------
+    // Start playback
+    // ------------------------------------------------------------------
     onVideoIdChanged: {
         errorLabel.text = "";
         if (videoId.length > 0)
@@ -893,43 +705,39 @@ Window {
             visible = false;
     }
 
+    // ------------------------------------------------------------------
+    // Shortcuts
+    // ------------------------------------------------------------------
     Shortcut {
         sequence: "M"
         onActivated: player.toggleMute()
     }
-
     Shortcut {
         sequence: "Up"
         onActivated: player.setVolume(Math.min(1.0, player.volume + 0.05))
     }
-
     Shortcut {
         sequence: "Down"
         onActivated: player.setVolume(Math.max(0.0, player.volume - 0.05))
     }
-
     Shortcut {
         sequence: "D"
         onActivated: player.download()
     }
-
     Shortcut {
         sequence: "F"
-        onActivated: playerWindow.toggleFullscreen()
+        onActivated: {
+            // No-op (see fullscreenButton): waylandsink fullscreen crashes Weston.
+        }
     }
-
     Shortcut {
         sequence: "F11"
-        onActivated: playerWindow.toggleFullscreen()
+        onActivated: {
+            // No-op (see fullscreenButton): waylandsink fullscreen crashes Weston.
+        }
     }
-
     Shortcut {
         sequence: "Esc"
-        onActivated: {
-            if (playerWindow.fullscreen)
-                playerWindow.leaveFullscreen();
-            else
-                playerWindow.close();
-        }
+        onActivated: playerWindow.close()
     }
 }
