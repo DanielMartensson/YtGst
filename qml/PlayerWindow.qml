@@ -944,13 +944,13 @@ Window {
         height: 140
         transformOrigin: Item.TopLeft
         scale: playerWindow.panelScale
-        // Only the scaled sizes go through a layer: the panel is then drawn at
-        // the final resolution and scaled 1:1, which keeps text and icons sharp.
-        // At S nothing is scaled, so the panel is drawn exactly as it always was.
-        layer.enabled: playerWindow.panelScale > 1.001
-        layer.smooth: true
-        layer.textureSize: Qt.size(Math.ceil(width * playerWindow.panelScale),
-                                   Math.ceil(height * playerWindow.panelScale))
+        // No supersampling layer here on purpose: the board's GPU has a 64 MB
+        // carve-out of its own, and a layer for a 1800x350 panel costs a second
+        // full-size buffer on top of the window's own. Switching to XL with a
+        // 1080p video playing ran the GPU out of memory (galcore: "core0 hang",
+        // cma_alloc failed), which froze the whole application. The panel is
+        // therefore scaled by the scene graph alone: one buffer per frame.
+        layer.enabled: false
     }
 
     // ------------------------------------------------------------------
