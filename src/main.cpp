@@ -168,23 +168,34 @@ static void preferVulkanCapablePlatform()
 }
 
 // Picks the scene graph's RHI graphics API before the application is
-// constructed. Vulkan is used when a supported GPU is present and the Vulkan
-// instance reports 1.2+; otherwise we fall back to OpenGL (GCNANO EGL). The
-// video itself is drawn by waylandsink in its own Weston window, so the RHI
-// only affects the control panel's scene graph.
+// constructed. The video is drawn by waylandsink in its own Weston window, so
+// the RHI only affects the control panel's scene graph - it does not touch the
+// decoding or the picture itself.
+//
+// Measured on the STM32MP25 board (libvulkan_VSI 1.3.3): a Qt Quick window on
+// Vulkan freezes the whole UI as soon as a window is exposed or restacked. The
+// render thread blocks inside the driver while it dispatches Wayland events,
+// the GUI thread then waits for the render thread
+// (processExposeEvent -> QQuickWindow -> QWaitCondition::wait), and the same
+// code path has been seen to segfault. waylandsink keeps feeding frames while
+// that happens, so the picture is fine but every control is dead. OpenGL
+// (GCNANO EGL) does not do this and holds ~58-60 fps. Vulkan therefore stays
+// available, but opt-in, through YTGST_RENDERER=vulkan.
 static void pickGraphicsApi()
 {
     const QByteArray forced = rendererFromEnv();
 
-    if (forced == "opengl") {
+    if (forced != "vulkan") {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
         g_graphicsApi = QStringLiteral("OpenGL");
-        g_graphicsReason = QStringLiteral("forced via YTGST_RENDERER");
-        qInfo("YtGst: using OpenGL renderer (forced)");
+        g_graphicsReason = forced == "opengl"
+            ? QStringLiteral("forced via YTGST_RENDERER")
+            : QStringLiteral("the VeriSilicon Vulkan driver freezes the GUI thread");
+        qInfo("YtGst: using OpenGL renderer (%s)", g_graphicsReason.toUtf8().constData());
         return;
     }
 
-    if (forced != "vulkan" && unstableVulkanIcdPresent()) {
+    if (unstableVulkanIcdPresent()) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
         g_graphicsApi = QStringLiteral("OpenGL");
         g_graphicsReason = QStringLiteral("unstable Vulkan drivers detected (nouveau/hasvk)");
@@ -213,7 +224,7 @@ static void pickGraphicsApi()
                 ? QStringLiteral("no supported Vulkan GPU")
                 : QStringLiteral("Vulkan instance below 1.2 (ICD does not expose vkEnumerateInstanceVersion)");
 
-    if (forced != "vulkan" && !suitable) {
+    if (!suitable) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
         g_graphicsApi = QStringLiteral("OpenGL");
         g_graphicsReason = vulkanFallbackReason;

@@ -898,21 +898,38 @@ void Player::updateProgress()
     if (!m_pipeline)
         return;
 
-    gint64 position = 0;
-    if (gst_element_query_position(m_pipeline, GST_FORMAT_TIME, &position) && position >= 0) {
-        const qint64 ms = position / GST_MSECOND;
-        if (ms != m_position) {
-            m_position = ms;
-            emit positionChanged();
-        }
-    }
+    // Only ask the pipeline while it has settled in PLAYING. A position or
+    // duration query is routed through the elements - for the audio playbin it
+    // takes the playbin lock - so while the pipeline is still prerolling the
+    // query blocks for as long as that state change does (tens of seconds when
+    // the sound server is unresponsive). Blocking here froze the GUI thread, and
+    // that same thread is the one that has to deliver the configure event
+    // waylandsink waits for, so playback never started at all.
+    GstState state = GST_STATE_VOID_PENDING;
+    const bool settled =
+        gst_element_get_state(m_pipeline, &state, nullptr, 0) == GST_STATE_CHANGE_SUCCESS
+        && state == GST_STATE_PLAYING;
 
-    gint64 duration = 0;
-    if (gst_element_query_duration(m_pipeline, GST_FORMAT_TIME, &duration) && duration > 0) {
-        const qint64 ms = duration / GST_MSECOND;
-        if (ms != m_duration) {
-            m_duration = ms;
-            emit durationChanged();
+    if (settled) {
+        // The video sink answers a position query itself, which keeps the
+        // playbin and its lock out of the path.
+        GstElement *positionSource = m_videoSink ? m_videoSink : m_pipeline;
+        gint64 position = 0;
+        if (gst_element_query_position(positionSource, GST_FORMAT_TIME, &position) && position >= 0) {
+            const qint64 ms = position / GST_MSECOND;
+            if (ms != m_position) {
+                m_position = ms;
+                emit positionChanged();
+            }
+        }
+
+        gint64 duration = 0;
+        if (gst_element_query_duration(m_pipeline, GST_FORMAT_TIME, &duration) && duration > 0) {
+            const qint64 ms = duration / GST_MSECOND;
+            if (ms != m_duration) {
+                m_duration = ms;
+                emit durationChanged();
+            }
         }
     }
 
@@ -1385,8 +1402,20 @@ void Player::attachSinkProbe(GstElement *videoBin)
             pad = gst_element_get_static_pad(sink, "video_sink");
         if (pad) {
             gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
-                              [](GstPad *, GstPadProbeInfo *, gpointer data) -> GstPadProbeReturn {
-                                  static_cast<Player *>(data)->m_sinkBuffers.fetch_add(1);
+                              [](GstPad *, GstPadProbeInfo *info, gpointer data) -> GstPadProbeReturn {
+                                  Player *self = static_cast<Player *>(data);
+                                  const int count = self->m_sinkBuffers.fetch_add(1) + 1;
+                                  // Also report from the streaming thread. The
+                                  // timer in updateProgress() prints the rate, but
+                                  // it lives on the GUI thread, so a blocked GUI
+                                  // would make a perfectly healthy stream look
+                                  // stalled in the log.
+                                  if ((count % 120) == 0) {
+                                      const GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+                                      fprintf(stderr,
+                                              "YtGst: video sink %d buffers, last pts %" GST_TIME_FORMAT "\n",
+                                              count, GST_TIME_ARGS(GST_BUFFER_PTS(buffer)));
+                                  }
                                   return GST_PAD_PROBE_OK;
                               },
                               this, nullptr);
