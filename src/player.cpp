@@ -315,7 +315,7 @@ Player::Player(QObject *parent)
                                   ? tr("Download failed")
                                   : tr("Error: %1").arg(QString::fromUtf8(err).right(160)));
         }
-        QTimer::singleShot(5000, this, [this]() {
+        QTimer::singleShot(10000, this, [this]() {
             if (!m_downloading)
                 setDownloadStatus(QString());
         });
@@ -370,14 +370,30 @@ void Player::download()
     emit downloadProgressChanged();
     setDownloadStatus(tr("Downloading..."));
 
+    // The download follows the resolution the panel is set to, and prefers
+    // H.264 + AAC so the two streams merge into a plain .mp4 that every player
+    // opens (VP9/Opus does not fit MP4 well). The fallbacks keep the download
+    // working when a video only exists as VP9/Opus, and the remux makes sure
+    // the file ends up with an .mp4 extension even when no merge was needed.
+    QString format;
+    if (m_resolution > 0) {
+        format = QStringLiteral("bv*[ext=mp4][height<=%1]+ba[ext=m4a]/"
+                                "b[ext=mp4][height<=%1]/"
+                                "bv*[height<=%1]+ba/b[height<=%1]")
+                     .arg(m_resolution);
+    } else {
+        format = QStringLiteral("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
+    }
+
     const QStringList arguments{
         QStringLiteral("--newline"),
         QStringLiteral("--no-warnings"),
         QStringLiteral("--no-playlist"),
         QStringLiteral("-P"), dir,
         QStringLiteral("-o"), QStringLiteral("%(title)s [%(id)s].%(ext)s"),
-        QStringLiteral("-f"), QStringLiteral("bestvideo+bestaudio/best"),
-        QStringLiteral("--merge-output-format"), QStringLiteral("mkv"),
+        QStringLiteral("-f"), format,
+        QStringLiteral("--merge-output-format"), QStringLiteral("mp4"),
+        QStringLiteral("--remux-video"), QStringLiteral("mp4"),
         m_watchUrl,
     };
     m_download.start(executable, arguments);
