@@ -152,12 +152,13 @@ Window {
         videoTitle: playerWindow.videoTitle
         fullscreen: player.fullscreen
 
-        onStopRequested: {
-            // Stopping leaves the window mapped: the play button starts the
-            // same video again, and the sink draws into the same Wayland
-            // surface it used before.
+        onCloseRequested: {
+            // The picture's window cannot be closed on its own: hiding it
+            // destroys its Wayland surface, and the board's Vulkan driver does
+            // not survive that. Closing it therefore ends the player, and the
+            // search window (which owns the player) stays open.
             player.stop();
-            playerWindow.revealChrome();
+            Qt.quit();
         }
     }
 

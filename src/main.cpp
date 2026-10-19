@@ -512,6 +512,14 @@ int main(int argc, char *argv[])
         }
     }
 
+    // TEMPORARY test hook, removed before the release: close the window after
+    // N milliseconds, through the same path as its close button.
+    if (const QByteArray closeAfter = qgetenv("YTGST_TEST_CLOSE_MS");
+        !closeAfter.isEmpty() && !engine.rootObjects().isEmpty()) {
+        if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()))
+            QTimer::singleShot(closeAfter.toInt(), window, [window]() { window->close(); });
+    }
+
     // Show a warning dialog at startup if GPU acceleration is unavailable.
     if (!problems.isEmpty()) {
         QTimer::singleShot(600, &app, [problems]() {
@@ -530,7 +538,11 @@ int main(int argc, char *argv[])
 
     const int result = app.exec();
 
-    gst_deinit();
+    // gst_deinit() is deliberately not called: it waits for every GStreamer
+    // thread, and one of the waylandsink's Wayland round-trips can keep a
+    // thread alive, which left the application hanging on exit - with the
+    // picture's window still on screen. The process is going away anyway, so
+    // the operating system reclaims GStreamer's memory.
 
     return result;
 }

@@ -27,14 +27,11 @@ Window {
 
     property string videoTitle: ""
     property bool fullscreen: false
-    // True once a picture has been shown: the stop button leaves an empty
-    // window behind, and that is what tells "stopped" from "not started yet".
-    property bool everPlayed: false
 
     readonly property int titleHeight: 34
     readonly property int frameWidth: 4
 
-    signal stopRequested()
+    signal closeRequested()
 
     width: 1282
     height: 720 + titleHeight
@@ -92,13 +89,12 @@ Window {
     }
 
     onClosing: (close) => {
-        // This window is part of the player and must not be hidden and shown
-        // again: hiding it destroys its Wayland surface, and the board's Vulkan
-        // driver crashes when a window's surface is recreated. Closing it
-        // therefore stops the playback instead, and the window stays mapped
-        // with an empty picture.
+        // The window cannot be hidden and shown again: hiding it destroys its
+        // Wayland surface, and the board's Vulkan driver crashes when a
+        // window's surface is recreated. Closing it is therefore handled by
+        // the player, which stops the pipeline and ends the process.
         close.accepted = false;
-        videoWindow.stopRequested();
+        videoWindow.closeRequested();
     }
 
     // ------------------------------------------------------------------
@@ -191,41 +187,38 @@ Window {
                 }
             }
 
-            // Stop. Not a close button: the window stays (see onClosing above),
-            // and the panel's Play button starts the video again.
+            // Close. The window itself is never hidden (see onClosing above), so
+            // this ends the player: the picture and the panel go away together.
             Rectangle {
                 width: 32
                 height: videoWindow.titleHeight - 6
                 radius: 4
-                color: stopButtonMouse.pressed
-                    ? "#3a3a42"
-                    : (stopButtonMouse.containsMouse ? "#2c2c33" : "transparent")
+                color: closeButtonMouse.pressed
+                    ? "#a33b3b"
+                    : (closeButtonMouse.containsMouse ? "#7a2a2a" : "transparent")
 
                 Canvas {
                     anchors.centerIn: parent
-                    width: 16
-                    height: 16
+                    width: 14
+                    height: 14
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
-                        // The usual stop symbol - a ring with a square in it -
-                        // so the button does not read as a close button.
                         ctx.strokeStyle = "#ffffff";
-                        ctx.lineWidth = 1.6;
+                        ctx.lineWidth = 1.8;
                         ctx.beginPath();
-                        ctx.arc(8, 8, 6.4, 0, 2 * Math.PI);
+                        ctx.moveTo(3, 3); ctx.lineTo(11, 11);
+                        ctx.moveTo(11, 3); ctx.lineTo(3, 11);
                         ctx.stroke();
-                        ctx.fillStyle = "#ffffff";
-                        ctx.fillRect(5.2, 5.2, 5.6, 5.6);
                     }
                 }
 
                 MouseArea {
-                    id: stopButtonMouse
+                    id: closeButtonMouse
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: videoWindow.stopRequested()
+                    onClicked: videoWindow.closeRequested()
                 }
             }
         }
@@ -300,42 +293,6 @@ Window {
                     ctx.stroke();
                 }
             }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Stopped picture
-    // ------------------------------------------------------------------
-    Connections {
-        target: videoWindow.playback
-        function onPlayingChanged() {
-            if (videoWindow.playback.playing)
-                videoWindow.everPlayed = true;
-        }
-    }
-
-    // The sink's sub-surface is gone once the playback has stopped, so the
-    // window's own content is visible again.
-    Column {
-        anchors.centerIn: parent
-        anchors.verticalCenterOffset: videoWindow.fullscreen ? 0 : videoWindow.titleHeight / 2
-        spacing: 8
-        visible: videoWindow.everPlayed && !videoWindow.playback.playing
-                 && videoWindow.playback.duration === 0
-
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: qsTr("Stopped")
-            color: "#e8e8ea"
-            font.pixelSize: 20
-            font.bold: true
-        }
-
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: qsTr("Press play in the control panel to start again")
-            color: "#8a8a92"
-            font.pixelSize: 13
         }
     }
 
