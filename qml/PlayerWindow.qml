@@ -609,6 +609,46 @@ Window {
         }
     }
 
+    // Close. The panel is the process's only visible control, so closing it also
+    // takes the video window down (close -> stop -> quit). The video window can
+    // still be closed on its own from its title bar, which leaves the panel
+    // running so the play button can bring the picture back.
+    Rectangle {
+        id: closeButton
+        width: 40
+        height: 40
+        radius: 20
+        color: closeButtonMouse.pressed ? "#e6000000" : "#b3000000"
+        border.color: "#33ffffff"
+        border.width: 1
+        z: 3
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: 52
+        anchors.rightMargin: 12
+
+        Canvas {
+            anchors.centerIn: parent
+            width: 16
+            height: 16
+            onPaint: {
+                var ctx = getContext("2d");
+                ctx.reset();
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(2, 2); ctx.lineTo(14, 14); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(14, 2); ctx.lineTo(2, 14); ctx.stroke();
+            }
+        }
+
+        MouseArea {
+            id: closeButtonMouse
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: playerWindow.close()
+        }
+    }
+
     // Volume (clicking the icon shows a vertical slider above)
     Item {
         id: volumeControl
@@ -620,7 +660,7 @@ Window {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.topMargin: 52
-        anchors.rightMargin: 12
+        anchors.rightMargin: 60
 
         Rectangle {
             id: volumePanel
