@@ -371,18 +371,20 @@ void Player::download()
     setDownloadStatus(tr("Downloading..."));
 
     // The download follows the resolution the panel is set to, and prefers
-    // H.264 + AAC so the two streams merge into a plain .mp4 that every player
-    // opens (VP9/Opus does not fit MP4 well). The fallbacks keep the download
+    // H.264 + AAC: those two merge into a plain .mp4 that every player opens,
+    // while VP9/Opus or AV1 in MP4 is a gamble. The fallbacks keep the download
     // working when a video only exists as VP9/Opus, and the remux makes sure
     // the file ends up with an .mp4 extension even when no merge was needed.
     QString format;
     if (m_resolution > 0) {
-        format = QStringLiteral("bv*[ext=mp4][height<=%1]+ba[ext=m4a]/"
+        format = QStringLiteral("bv*[vcodec^=avc1][height<=%1]+ba[ext=m4a]/"
+                                "bv*[ext=mp4][height<=%1]+ba[ext=m4a]/"
                                 "b[ext=mp4][height<=%1]/"
                                 "bv*[height<=%1]+ba/b[height<=%1]")
                      .arg(m_resolution);
     } else {
-        format = QStringLiteral("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
+        format = QStringLiteral("bv*[vcodec^=avc1]+ba[ext=m4a]/"
+                                "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b");
     }
 
     const QStringList arguments{
