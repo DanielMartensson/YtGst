@@ -538,13 +538,14 @@ int main(int argc, char *argv[])
 
     const int result = app.exec();
 
-    // gst_deinit() is deliberately not called: it waits for every GStreamer
-    // thread, and one of the waylandsink's Wayland round-trips can keep a
-    // thread alive, which left the application hanging on exit - with the
-    // picture's window still on screen. The process is going away anyway, so
-    // the operating system reclaims GStreamer's memory.
-
-    return result;
+    // Leave without tearing the application down: destroying the Quick windows
+    // makes the Vulkan driver's WSI thread and GStreamer's waylandsink thread
+    // run their teardown at the same time as the rest of the process, which
+    // aborts in glibc's robust-mutex check. The compositor removes the windows
+    // as soon as the Wayland connection closes, so there is nothing to gain
+    // from that teardown - and gst_deinit() is equally unnecessary here.
+    fflush(nullptr);
+    ::_exit(result);
 }
 
 #include "main.moc"
