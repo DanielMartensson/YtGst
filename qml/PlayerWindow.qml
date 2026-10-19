@@ -263,6 +263,11 @@ Window {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
+        // The panel background is inset by these 2 px (its border is drawn
+        // inside them), so the bar ends exactly at the panel's edge instead of
+        // poking out past the rounded frame.
+        anchors.leftMargin: 2
+        anchors.rightMargin: 2
         anchors.topMargin: 8
         height: 36
         z: 3
@@ -279,7 +284,7 @@ Window {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            height: progressBar.active ? 5 : 3
+            height: progressBar.active ? 7 : 5
             radius: height / 2
             color: "#55ffffff"
             Behavior on height { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
