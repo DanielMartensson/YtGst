@@ -83,13 +83,13 @@ Window {
 
     // ------------------------------------------------------------------
     // Fade the controls out when the pointer has been away for a while.
-    // contentItem is the root item of the window's own content (the panel
-    // background and every control), so animating its opacity fades the whole
-    // panel without unmapping the window.
+    // The animation drives a container the controls are moved into (see
+    // Component.onCompleted below), so the panel background and every control
+    // fade - but the subtitles, which live outside the container, do not.
     // ------------------------------------------------------------------
     NumberAnimation {
         id: chromeFade
-        target: playerWindow.contentItem
+        target: chrome
         property: "opacity"
         duration: 220
         easing.type: Easing.InOutQuad
@@ -837,22 +837,58 @@ Window {
         }
     }
 
-    // Subtitle text (shown in the panel, since there is no video overlay)
-    Text {
-        id: subtitleText
+    // ------------------------------------------------------------------
+    // Subtitles: white on a black plate, and they stay on screen when the
+    // controls fade away. Every other item of the panel is moved into the
+    // "chrome" container below, which is what the fade animates.
+    // ------------------------------------------------------------------
+    Item {
+        id: chrome
+        anchors.fill: parent
+        z: 0
+    }
+
+    Item {
+        id: subtitleBox
         visible: player.subtitleText.length > 0
+        anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottomMargin: 10
-        color: "#ffffff"
-        font.pixelSize: 16
-        font.bold: true
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.Wrap
-        width: parent.width - 24
-        text: player.subtitleText
+        anchors.bottomMargin: 8
+        width: Math.min(subtitleText.implicitWidth, playerWindow.width - 40) + 24
+        height: subtitleText.implicitHeight + 12
         z: 4
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 4
+            color: "#cc000000"
+            border.color: "#33ffffff"
+            border.width: 1
+        }
+
+        Text {
+            id: subtitleText
+            anchors.centerIn: parent
+            width: parent.width - 24
+            color: "#ffffff"
+            font.pixelSize: 16
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            text: player.subtitleText
+        }
+    }
+
+    // The controls are collected here once the window's items exist, so the
+    // fade above can exclude the subtitles. The container covers the window,
+    // so every item keeps its anchors.
+    Component.onCompleted: {
+        const items = playerWindow.contentItem.children.slice();
+        for (let i = 0; i < items.length; ++i) {
+            const item = items[i];
+            if (item !== chrome && item !== subtitleBox)
+                item.parent = chrome;
+        }
     }
 
     // ------------------------------------------------------------------

@@ -387,6 +387,12 @@ void Player::readDownloadOutput()
 {
     const QString text = QString::fromUtf8(m_download.readAllStandardOutput());
 
+    // yt-dlp's output can still arrive after it has exited, and after the
+    // final status ("Download complete") has been set. A finished download
+    // must not be dragged back to a percentage it printed on its way out.
+    if (m_download.state() == QProcess::NotRunning)
+        return;
+
     static const QRegularExpression percent(QStringLiteral("(\\d+(?:\\.\\d+)?)%"));
     auto matches = percent.globalMatch(text);
     double latest = m_downloadProgress;
@@ -403,7 +409,13 @@ void Player::readDownloadOutput()
         m_downloadProgress = latest;
         emit downloadProgressChanged();
     }
-    setDownloadStatus(tr("Downloading... %1%").arg(qRound(latest * 100.0)));
+    // Both streams are down at 100%; what yt-dlp does next is merge them into
+    // the container, which can take a while for a long video. Saying so is
+    // better than sitting at "Downloading... 100%".
+    if (latest >= 1.0 || text.contains(QStringLiteral("Merging formats")))
+        setDownloadStatus(tr("Finishing the download..."));
+    else
+        setDownloadStatus(tr("Downloading... %1%").arg(qRound(latest * 100.0)));
 }
 
 void Player::setTitle(const QString &title)
