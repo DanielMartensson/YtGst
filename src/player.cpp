@@ -1336,8 +1336,23 @@ void Player::buildPipeline()
             // the audio sink fail the whole pipeline with "Failed to connect:
             // Connection refused".
             emit errorOccurred(tr("No sound server found - playing without audio."));
+        } else if (qgetenv("YTGST_NO_AUDIO") == "1") {
+            // Debug switch: the picture alone, to tell a stutter that the audio
+            // causes from one that is there anyway (see the audio comment below
+            // for how to measure the picture).
+            qWarning("YtGst: YTGST_NO_AUDIO=1 - playing without audio");
         } else {
-            // === AUDIO: separate playbin in the same pipeline (shared clock => sync) ===
+            // === AUDIO: a playbin in the same pipeline, on purpose ===
+            // In the same pipeline the sound and the picture share one clock,
+            // one base time and one set of seeks, so they stay in step by
+            // construction and pause/resume/rate need no special care. The
+            // audio branch costs the picture nothing - measured on this board
+            // with progressreport between the decoder and the sink: video
+            // alone, video + audio (fetched with souphttpsrc or curlhttpsrc) and
+            // audio in a pipeline of its own all reach 43 s of content in 45 s
+            // of wall clock. It does not share the video's decoding path either:
+            // the picture is an explicit chain, not a playbin, because a
+            // playbin's buffering queue stalls this board's V4L2 decoder.
             GstElement *aplay = gst_element_factory_make("playbin", "aplay");
             g_object_set(aplay, "uri", m_audioUrl.toUtf8().constData(),
                          "audio-sink",

@@ -293,7 +293,7 @@ Window {
     }
 
     // ------------------------------------------------------------------
-    // Buttons row (always visible - no auto-hide)
+    // Buttons row (fades together with the rest of the panel)
     // ------------------------------------------------------------------
     // Play/pause
     Rectangle {
