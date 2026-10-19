@@ -31,7 +31,7 @@ Window {
     readonly property int titleHeight: 34
     readonly property int frameWidth: 4
 
-    signal closeRequested()
+    signal stopRequested()
 
     width: 1282
     height: 720 + titleHeight
@@ -43,10 +43,10 @@ Window {
     // The frame is ours; asking for platform decorations would only be answered
     // by a compositor that draws them.
     flags: Qt.FramelessWindowHint
-    // Two independent windows on purpose: the panel has to be able to sit on
-    // top of the picture. A window declared inside another one is a transient
-    // child of it, and a compositor may then keep the child above (or clamp it
-    // inside) its parent - exactly what must not happen here.
+    // The panel is the one that is a transient child (it is smaller and has to
+    // stay above the picture); this window is the parent, so it must not take
+    // the panel as its own transient parent just because it is declared inside
+    // it.
     transientParent: null
 
     // ------------------------------------------------------------------
@@ -88,12 +88,13 @@ Window {
     }
 
     onClosing: (close) => {
-        // Closing the picture's window is the panel's decision: it stops the
-        // playback (and with it the pipeline that draws into this window) and
-        // then hides it. Keeping the window itself alive keeps its Wayland
-        // surface - the surface the sink draws into - valid.
+        // This window is part of the player and must not be hidden and shown
+        // again: hiding it destroys its Wayland surface, and the board's Vulkan
+        // driver crashes when a window's surface is recreated. Closing it
+        // therefore stops the playback instead, and the window stays mapped
+        // with an empty picture.
         close.accepted = false;
-        videoWindow.closeRequested();
+        videoWindow.stopRequested();
     }
 
     // ------------------------------------------------------------------
@@ -186,14 +187,15 @@ Window {
                 }
             }
 
-            // Close
+            // Stop. Not a close button: the window stays (see onClosing above),
+            // and the panel's Play button starts the video again.
             Rectangle {
                 width: 32
                 height: videoWindow.titleHeight - 6
                 radius: 4
-                color: closeButtonMouse.pressed
-                    ? "#a33b3b"
-                    : (closeButtonMouse.containsMouse ? "#7a2a2a" : "transparent")
+                color: stopButtonMouse.pressed
+                    ? "#3a3a42"
+                    : (stopButtonMouse.containsMouse ? "#2c2c33" : "transparent")
 
                 Canvas {
                     anchors.centerIn: parent
@@ -202,21 +204,17 @@ Window {
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
-                        ctx.strokeStyle = "#ffffff";
-                        ctx.lineWidth = 1.8;
-                        ctx.beginPath();
-                        ctx.moveTo(3, 3); ctx.lineTo(11, 11);
-                        ctx.moveTo(11, 3); ctx.lineTo(3, 11);
-                        ctx.stroke();
+                        ctx.fillStyle = "#ffffff";
+                        ctx.fillRect(3, 3, 8, 8);
                     }
                 }
 
                 MouseArea {
-                    id: closeButtonMouse
+                    id: stopButtonMouse
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: videoWindow.closeRequested()
+                    onClicked: videoWindow.stopRequested()
                 }
             }
         }

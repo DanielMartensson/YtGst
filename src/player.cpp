@@ -1341,9 +1341,10 @@ void Player::buildPipeline()
     // launcher). It draws into the picture's own window when there is one (see
     // embedVideoIntoWindow() below and VideoWindow.qml), so the picture gets a
     // frame the platform does not provide; otherwise it opens a window of its
-    // own. The control panel is a third, transparent window (PlayerWindow.qml).
-    // All of them belong to this process, so closing the panel stops the
-    // pipeline and takes the picture's window with it.
+    // own. The control panel (PlayerWindow.qml) is a transparent window and a
+    // transient child of the picture's window, so the compositor keeps it just
+    // above the picture. All of them belong to this process, so closing the
+    // panel stops the pipeline and takes the picture's window with it.
     QString videoSinkDescription = QStringLiteral(YTGST_VIDEO_SINK);
     if (videoSinkDescription.isEmpty())
         videoSinkDescription = QStringLiteral("waylandsink name=gsink");

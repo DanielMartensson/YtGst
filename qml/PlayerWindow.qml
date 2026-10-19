@@ -53,23 +53,32 @@ Window {
     }
 
     // ------------------------------------------------------------------
-    // Raise over the video window. Weston stacks newer windows on top; the
-    // video window (waylandsink) is created after this panel, so it lands on
-    // top of us. Hiding and re-showing the panel forces a new configure that
-    // puts it back over the video window.
+    // Stay over the video window.
+    //
+    // The panel is the video window's Wayland child (transientParent). Weston
+    // stacks a child immediately in front of its parent, activates the child
+    // instead of the parent and keeps the two in the same layer, so the
+    // controls stay over the picture - also in fullscreen - without ever
+    // hiding and re-showing a window. That matters on this board: hiding a Qt
+    // window destroys its Wayland surface, and the VeriSilicon Vulkan driver
+    // segfaults when a window's surface is recreated.
     // ------------------------------------------------------------------
-    Timer {
-        id: raiseHideTimer
-        interval: 500
-        onTriggered: {
-            playerWindow.visible = false;
-            reShowTimer.restart();
-        }
+    transientParent: videoWindow
+
+    // The video window has to be mapped before the panel: a child can only
+    // attach to a parent that already has a Wayland surface.
+    onStandaloneChanged: {
+        if (!standalone)
+            return;
+        videoWindow.visible = true;
+        videoWindow.syncVisibility();
+        panelShowTimer.start();
     }
+
     Timer {
-        id: reShowTimer
-        interval: 100
-        onTriggered: playerWindow.visible = true;
+        id: panelShowTimer
+        interval: 0
+        onTriggered: playerWindow.visible = true
     }
 
     // ------------------------------------------------------------------
@@ -124,9 +133,7 @@ Window {
             errorClearTimer.restart();
         }
         onPlayingChanged: {
-            if (playing)
-                raiseHideTimer.restart();
-            else
+            if (!playing)
                 playerWindow.revealChrome();  // show the play button again
         }
     }
@@ -145,11 +152,11 @@ Window {
         videoTitle: playerWindow.videoTitle
         fullscreen: player.fullscreen
 
-        onCloseRequested: {
-            // Closing the picture stops the playback and leaves the panel, so
-            // the play button can start the same video again.
+        onStopRequested: {
+            // Stopping leaves the window mapped: the play button starts the
+            // same video again, and the sink draws into the same Wayland
+            // surface it used before.
             player.stop();
-            videoWindow.visible = false;
             playerWindow.revealChrome();
         }
     }
@@ -867,24 +874,23 @@ Window {
         id: playTimer
         interval: 300
         onTriggered: {
-            // The picture's window first: the pipeline is built for its Wayland
-            // surface, and showing it here is what creates that surface. It also
-            // goes on top of the panel, so the panel is put back up.
+            // The picture's window is mapped for the whole session (one that is
+            // shown again gets a new Wayland surface, which the board's Vulkan
+            // driver does not survive), so this only makes sure it is visible
+            // before the sink draws into it.
             videoWindow.visible = true;
             videoWindow.syncVisibility();
-            raiseHideTimer.restart();
             player.play(videoId);
         }
     }
 
     onClosing: {
+        // Closing the panel ends the player. The picture's window is never
+        // hidden (hiding destroys its Wayland surface), it goes away with the
+        // process.
         player.stop();
-        videoWindow.visible = false;
         videoId = "";
-        if (standalone)
-            Qt.quit();
-        else
-            visible = false;
+        Qt.quit();
     }
 
     // ------------------------------------------------------------------

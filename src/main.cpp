@@ -475,7 +475,8 @@ int main(int argc, char *argv[])
         if (!engine.rootObjects().isEmpty()) {
             QObject *root = engine.rootObjects().first();
             root->setProperty("standalone", true);
-            root->setProperty("visible", true);
+            // The panel shows itself (and the picture's window first) once
+            // standalone is set - see PlayerWindow.qml.
             root->setProperty("videoId", playId);
             root->setProperty("videoTitle", playTitle);
         }
