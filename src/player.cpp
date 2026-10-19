@@ -1257,7 +1257,29 @@ void Player::buildPipeline()
     // The queue between the demux and the parser matches youtube-play.sh; it
     // gives the decoder a bounded, back-pressured buffer so the V4L2 stateless
     // decoder is never starved or flooded.
+    //
+    // It is deliberately a deep one - 10 s of compressed video, a few megabytes.
+    // An HLS segment fetch that hiccups, the CDN taking a second or two, then
+    // costs buffered seconds instead of the picture. At the default size (about a
+    // second) the queue runs empty, the sink starves for a couple of seconds and
+    // the stream jumps forward when the segment finally arrives. Measured on the
+    // board by printing the content position once a second (a healthy second
+    // advances by 1, a freeze shows as 0, a catch-up jump as 2 or more):
+    //
+    //   default queue  0! 1 1 1 1 1 1 1 0! 4 0! 1 1 ...   (freezes and jumps)
+    //   10 s queue     1 1 1 1 1 1 1 1 1 1 1 1 1 1 ...     (nothing)
+    //
+    // The size is only a time limit: the byte and buffer limits are switched off.
+    // It does not delay the start (a queue does not wait to fill) and a seek
+    // flushes it like any other buffer.
     GstElement *vqueue = gst_element_factory_make("queue", "vqueue");
+    if (vqueue) {
+        g_object_set(vqueue,
+                     "max-size-buffers", guint(0),
+                     "max-size-bytes", guint(0),
+                     "max-size-time", guint64(10) * GST_SECOND,
+                     nullptr);
+    }
     GstElement *vparse = gst_element_factory_make("h264parse", "vparse");
     GstElement *vdecoder = gst_element_factory_make(videoDecoder.toUtf8().constData(),
                                                     "vdecoder");
