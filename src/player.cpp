@@ -16,6 +16,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
@@ -1348,11 +1349,13 @@ void Player::buildPipeline()
     // draws into the QML item) or waylandsink (which draws into the socket of
     // the compositor that window runs).
     GstElement *gsink = findElementByName(vbin, "gsink");
+    bool usesQmlSink = false;
     if (gsink) {
         GstElementFactory *factory = gst_element_get_factory(gsink);
         const gchar *factoryName = factory
             ? gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)) : nullptr;
-        if (m_item && g_strcmp0(factoryName, "qml6glsink") == 0)
+        usesQmlSink = g_strcmp0(factoryName, "qml6glsink") == 0;
+        if (usesQmlSink && m_item)
             g_object_set(gsink, "widget", m_item, nullptr);
         else if (!m_sinkDisplay.isEmpty() && g_strcmp0(factoryName, "waylandsink") == 0)
             g_object_set(gsink, "display", m_sinkDisplay.toUtf8().constData(), nullptr);
@@ -1367,17 +1370,29 @@ void Player::buildPipeline()
     g_signal_connect(gst_element_get_bus(m_pipeline), "message",
                      G_CALLBACK(onBusMessage), this);
 
-    // Start through a scene graph update, so the GL context that is active when
-    // the pipeline starts is the PlayerWindow's (otherwise qml6glsink draws in
-    // whichever context rendered last).
+    // qml6glsink has to start from a scene graph update, so that the GL context
+    // that is active when the pipeline starts is the PlayerWindow's (otherwise
+    // that sink draws in whichever context rendered last).
     QQuickWindow *win = m_item ? m_item->window() : nullptr;
-    gst_element_set_state(m_pipeline, GST_STATE_READY);
 
-    if (win) {
+    if (usesQmlSink && win) {
         win->update();
         win->scheduleRenderJob(new SetPlaying(m_pipeline), QQuickWindow::BeforeSynchronizingStage);
     } else {
-        gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
+        // Every other sink starts on a thread of its own. The player window
+        // runs a Wayland compositor and this thread is the one that drives it;
+        // waylandsink talks to that compositor while it changes state (it waits
+        // for the compositor to configure its surface before it prerolls), so
+        // setting the state from here would leave this thread waiting for a
+        // compositor that only this thread can run - the pipeline would never
+        // reach PLAYING and neither the picture nor the sound would come.
+        GstElement *pipeline = GST_ELEMENT(gst_object_ref(m_pipeline));
+        QThread *starter = QThread::create([pipeline]() {
+            gst_element_set_state(pipeline, GST_STATE_PLAYING);
+            gst_object_unref(pipeline);
+        });
+        connect(starter, &QThread::finished, starter, &QObject::deleteLater);
+        starter->start();
     }
 
     m_duration = 0;
