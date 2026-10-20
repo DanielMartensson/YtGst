@@ -146,6 +146,7 @@ private:
     QString m_title;
     QString m_watchUrl;
     QString m_videoUrl;
+    QString m_videoProtocol;
     QString m_audioUrl;
     qint64 m_duration = 0;
     qint64 m_position = 0;

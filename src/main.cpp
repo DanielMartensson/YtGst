@@ -121,6 +121,23 @@ static QStringList startupProblems()
     return problems;
 }
 
+// Raises the rank of a configured decoder (YTGST_VIDEO_DECODER or
+// YTGST_AUDIO_DECODER, see CMakeLists.txt), so the elements that pick a decoder
+// themselves - the audio playbin, or uridecodebin in the video path - prefer it.
+static void raiseDecoderRank(const QByteArray &name)
+{
+    if (name.isEmpty())
+        return;
+    GstRegistry *registry = gst_registry_get();
+    GstPluginFeature *feature = gst_registry_lookup_feature(registry, name.constData());
+    if (!feature) {
+        qWarning("Decoder \"%s\" was not found", name.constData());
+        return;
+    }
+    gst_plugin_feature_set_rank(feature, GST_RANK_PRIMARY + 1);
+    gst_object_unref(feature);
+}
+
 // Extracts a YouTube video ID from a full URL (or a bare 11-char ID).
 // Returns an empty string when nothing could be extracted.
 static QString videoIdFrom(const QString &text)
@@ -188,23 +205,16 @@ int main(int argc, char *argv[])
 
     gst_init(&argc, &argv);
 
-    // Prioritise the configured video decoder (YTGST_VIDEO_DECODER, for example
-    // vah264dec) over the others, so playbin chooses hardware decoding first.
+    // Prioritise the configured decoders (YTGST_VIDEO_DECODER and
+    // YTGST_AUDIO_DECODER, for example vah264dec and avdec_aac) over the others.
+    // The audio stream is decoded by a playbin, which picks a decoder itself, so
+    // the rank is what steers it; the video decoder is named explicitly in the
+    // video chain as well (see buildPipeline()).
 #ifdef YTGST_VIDEO_DECODER
-    {
-        const QByteArray decoder = QByteArrayLiteral(YTGST_VIDEO_DECODER);
-        if (!decoder.isEmpty()) {
-            GstRegistry *registry = gst_registry_get();
-            GstPluginFeature *feature = gst_registry_lookup_feature(registry, decoder.constData());
-            if (feature) {
-                gst_plugin_feature_set_rank(feature, GST_RANK_PRIMARY + 1);
-                gst_object_unref(feature);
-            } else {
-                qWarning("Video decoder \"%s\" not found – a warning is shown at startup",
-                         decoder.constData());
-            }
-        }
-    }
+    raiseDecoderRank(QByteArrayLiteral(YTGST_VIDEO_DECODER));
+#endif
+#ifdef YTGST_AUDIO_DECODER
+    raiseDecoderRank(QByteArrayLiteral(YTGST_AUDIO_DECODER));
 #endif
 
     // The qml6glsink plugin MUST be loaded before the QML engine is created,

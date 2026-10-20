@@ -182,6 +182,72 @@ static void onSourceSetup(GstElement *, GstElement *source, gpointer)
                      nullptr);
 }
 
+// Links a pad that a demuxer only exposes once the stream arrives to the next
+// element in the chain.
+//
+// gst_parse_bin_from_description() completes this "delayed link" by itself when
+// it parses a whole pipeline, but not when the chain ends up in a bin:
+// hlsdemux, tsdemux and qtdemux create their pads at runtime, the parser gives
+// up with "Delayed linking failed" and no frame ever reaches the sink. The
+// video chain is therefore built from single elements in buildPipeline() and
+// its dynamic pads are linked here.
+static void linkDemuxPadTo(GstPad *pad, GstElement *element)
+{
+    if (GST_PAD_DIRECTION(pad) != GST_PAD_SRC)
+        return;
+    GstPad *sink = gst_element_get_static_pad(element, "sink");
+    if (!sink)
+        return;
+    if (!gst_pad_is_linked(sink))
+        gst_pad_link(pad, sink);
+    gst_object_unref(sink);
+}
+
+// hlsdemux announces its stream pad after the playlist has been read.
+static void onHlsdemuxPadAdded(GstElement *, GstPad *pad, gpointer userData)
+{
+    linkDemuxPadTo(pad, GST_ELEMENT(userData));
+}
+
+// tsdemux (MPEG-TS) and qtdemux (mp4) expose one pad per elementary stream.
+// Only the H.264 video stream continues to h264parse; anything else (an audio
+// track of the same container, for example) is left alone.
+static void onDemuxPadAdded(GstElement *, GstPad *pad, gpointer userData)
+{
+    if (GST_PAD_DIRECTION(pad) != GST_PAD_SRC)
+        return;
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    if (!caps)
+        caps = gst_pad_query_caps(pad, nullptr);
+    bool video = false;
+    if (caps && gst_caps_get_size(caps) > 0) {
+        const gchar *name = gst_structure_get_name(gst_caps_get_structure(caps, 0));
+        video = g_str_has_prefix(name, "video/");
+    }
+    if (caps)
+        gst_caps_unref(caps);
+    if (video)
+        linkDemuxPadTo(pad, GST_ELEMENT(userData));
+}
+
+// gst_bin_get_by_name() only looks at direct children; the video sink chain is
+// a bin of its own, so its elements have to be searched recursively.
+static GstElement *findElementByName(GstElement *root, const char *name)
+{
+    GstIterator *iterator = gst_bin_iterate_recurse(GST_BIN(root));
+    GValue item = G_VALUE_INIT;
+    GstElement *found = nullptr;
+    while (!found && gst_iterator_next(iterator, &item) == GST_ITERATOR_OK) {
+        GstElement *element = GST_ELEMENT(g_value_get_object(&item));
+        if (g_strcmp0(GST_ELEMENT_NAME(element), name) == 0)
+            found = GST_ELEMENT(gst_object_ref(element));
+        g_value_reset(&item);
+    }
+    g_value_unset(&item);
+    gst_iterator_free(iterator);
+    return found;
+}
+
 class SetPlaying : public QRunnable
 {
 public:
@@ -844,7 +910,10 @@ void Player::applyVolume()
         GstElement *play = gst_bin_get_by_name(GST_BIN(m_pipeline), name);
         if (!play)
             continue;
-        g_object_set(play, "volume", effective, nullptr);
+        // The video branch is a plain chain now, not a playbin, so it has no
+        // "volume" property; only the audio playbin is set.
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(play), "volume"))
+            g_object_set(play, "volume", effective, nullptr);
         gst_object_unref(play);
     }
 }
@@ -1024,9 +1093,11 @@ void Player::handleFetchOutput()
         videoUrl = requested.at(0).toObject().value(QStringLiteral("url")).toString();
         audioUrl = requested.at(1).toObject().value(QStringLiteral("url")).toString();
         actualHeight = requested.at(0).toObject().value(QStringLiteral("height")).toInt();
+        m_videoProtocol = requested.at(0).toObject().value(QStringLiteral("protocol")).toString();
     } else {
         videoUrl = obj.value(QStringLiteral("url")).toString();
         actualHeight = obj.value(QStringLiteral("height")).toInt();
+        m_videoProtocol = obj.value(QStringLiteral("protocol")).toString();
     }
 
     m_loading = false;
@@ -1112,6 +1183,16 @@ static bool prepareSoundServer()
 // it is only the last resort on a system without a sound server.
 static QString audioSinkDescription()
 {
+    // The CMake flag YTGST_AUDIO_SINK (see CMakeLists.txt) decides on a build
+    // for other hardware; the environment overrides it for a quick comparison
+    // without a rebuild.
+    const QByteArray configured = qgetenv("YTGST_AUDIO_SINK");
+    const QString forced = configured.isEmpty()
+        ? QStringLiteral(YTGST_AUDIO_SINK)
+        : QString::fromLocal8Bit(configured);
+    if (!forced.isEmpty())
+        return forced;
+
     const char *candidates[] = {"pulsesink", "pipewiresink", "autoaudiosink", nullptr};
     for (int i = 0; candidates[i]; ++i) {
         GstElementFactory *factory = gst_element_factory_find(candidates[i]);
@@ -1140,13 +1221,26 @@ void Player::buildPipeline()
     m_pipeline = gst_pipeline_new("pipe");
     m_audioPlay = nullptr;
 
-    // === VIDEO: playbin with qml6glsink behind glupload/glcolorconvert ===
-    // Note: playbin has no writable "source" – set only valid properties,
-    // otherwise g_object_set fails and "video-sink" is never applied
-    // (then playbin's default sink takes over and opens its own window).
-    // qml6glsink only accepts GLMemory (RGBA/BGRA/RGB/YV12).
-    QString videoSinkDescription =
-        "glupload ! glcolorconvert ! capsfilter caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" ! qml6glsink name=gsink";
+    // === VIDEO: an explicit chain instead of a playbin ===
+    // A playbin/uridecodebin inserts a buffering queue (use-buffering=true,
+    // high-percent=99, max-size-time=5 s) that stalls this board's V4L2
+    // stateless H.264 decoder: the video renders very slowly while the audio
+    // stays fine. An explicit chain feeds the decoder directly and plays
+    // 1080p60 at a sustained 60 fps. YouTube video here is always HLS
+    // (MPEG-TS segments); qtdemux handles another container (DASH mp4).
+    //
+    // The elements are created one by one rather than through
+    // gst_parse_bin_from_description(): the demuxers only expose their pads
+    // once the stream arrives and the parser cannot finish that delayed link
+    // inside a bin (it logs "Delayed linking failed" and no frame ever reaches
+    // the sink). The dynamic pads are linked in onHlsdemuxPadAdded() and
+    // onDemuxPadAdded().
+    QString videoSinkDescription = QStringLiteral(YTGST_VIDEO_SINK);
+    if (videoSinkDescription.isEmpty())
+        videoSinkDescription = QStringLiteral(
+            "glupload ! glcolorconvert ! capsfilter "
+            "caps=\"video/x-raw(memory:GLMemory),format=(string)RGBA\" "
+            "! qml6glsink name=gsink");
 
     // YTGST_VIDEO_SINK=<gst description> replaces the video sink chain, so the
     // sinks can be compared on a board without rebuilding (for example
@@ -1155,12 +1249,60 @@ void Player::buildPipeline()
     if (!sinkOverride.isEmpty())
         videoSinkDescription = QString::fromLocal8Bit(sinkOverride);
 
-    GstElement *vplay = gst_element_factory_make("playbin", "vplay");
-    GstElement *vbin = gst_parse_bin_from_description(videoSinkDescription.toUtf8().constData(),
-                                                      TRUE, nullptr);
-    g_object_set(vplay, "uri", m_videoUrl.toUtf8().constData(),
-                 "video-sink", vbin, nullptr);
-    g_signal_connect(vplay, "source-setup", G_CALLBACK(onSourceSetup), nullptr);
+    // The decoder is a CMake flag (YTGST_VIDEO_DECODER, see CMakeLists.txt), so
+    // a build for other hardware picks its own. The environment overrides it
+    // without a rebuild.
+    const QByteArray decoderOverride = qgetenv("YTGST_VIDEO_DECODER");
+    const QString videoDecoder = decoderOverride.isEmpty()
+        ? QStringLiteral(YTGST_VIDEO_DECODER)
+        : QString::fromLocal8Bit(decoderOverride);
+
+    const bool hls = m_videoProtocol.startsWith(QLatin1String("m3u8"));
+    GstElement *vplay = gst_bin_new("vplay");
+    GstElement *vsrc = gst_element_factory_make("souphttpsrc", "vsrc");
+    GstElement *vdemux = gst_element_factory_make(hls ? "hlsdemux" : "qtdemux", "vdemux");
+    GstElement *vtsdemux = hls ? gst_element_factory_make("tsdemux", "vtsdemux") : nullptr;
+    GstElement *vparse = gst_element_factory_make("h264parse", "vparse");
+    GstElement *vdecoder = gst_element_factory_make(videoDecoder.toUtf8().constData(),
+                                                    "vdecoder");
+    GstElement *vsink = gst_parse_bin_from_description(videoSinkDescription.toUtf8().constData(),
+                                                       TRUE, nullptr);
+    if (!vsrc || !vdemux || (hls && !vtsdemux) || !vparse || !vdecoder || !vsink) {
+        emit errorOccurred(QStringLiteral("Could not build the video pipeline"));
+        return;
+    }
+
+    g_object_set(vsrc, "location", m_videoUrl.toUtf8().constData(),
+                 "user-agent",
+                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                 "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                 nullptr);
+
+    gst_bin_add(GST_BIN(vplay), vsrc);
+    gst_bin_add(GST_BIN(vplay), vdemux);
+    if (vtsdemux)
+        gst_bin_add(GST_BIN(vplay), vtsdemux);
+    gst_bin_add(GST_BIN(vplay), vparse);
+    gst_bin_add(GST_BIN(vplay), vdecoder);
+    gst_bin_add(GST_BIN(vplay), vsink);
+
+    // h264parse, the decoder and the sink have static pads and are linked right
+    // away; the demuxers are linked when they announce their pads.
+    bool linked = gst_element_link(vsrc, vdemux)
+        && gst_element_link(vparse, vdecoder)
+        && gst_element_link(vdecoder, vsink);
+    if (vtsdemux) {
+        g_signal_connect(vdemux, "pad-added", G_CALLBACK(onHlsdemuxPadAdded), vtsdemux);
+        g_signal_connect(vtsdemux, "pad-added", G_CALLBACK(onDemuxPadAdded), vparse);
+    } else {
+        g_signal_connect(vdemux, "pad-added", G_CALLBACK(onDemuxPadAdded), vparse);
+    }
+    if (!linked) {
+        emit errorOccurred(QStringLiteral("Could not link the video pipeline"));
+        return;
+    }
+
+    GstElement *vbin = vplay;
     gst_bin_add(GST_BIN(m_pipeline), vplay);
 
     if (!m_audioUrl.isEmpty()) {
@@ -1185,7 +1327,7 @@ void Player::buildPipeline()
         }
     }
 
-    GstElement *gsink = gst_bin_get_by_name(GST_BIN(vbin), "gsink");
+    GstElement *gsink = findElementByName(vbin, "gsink");
     if (gsink) {
         g_object_set(gsink, "widget", m_item, nullptr);
         gst_object_unref(gsink);
