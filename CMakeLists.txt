@@ -26,6 +26,19 @@ if(YTGST_YTDLP_PATH STREQUAL "")
 endif()
 message(STATUS "yt-dlp: ${YTGST_YTDLP_PATH}")
 
+# Which RHI backend to use when YTGST_RENDERER says nothing:
+#   auto   - Vulkan when the GPU has a usable 1.2+ driver, OpenGL otherwise
+#   opengl - OpenGL only
+#   vulkan - Vulkan only, falling back to OpenGL (with a reason in the log) if
+#            the instance is unusable
+# YTGST_RENDERER=opengl|vulkan overrides this at run time.
+set(YTGST_DEFAULT_RENDERER "auto" CACHE STRING
+    "Default graphics backend: auto, opengl or vulkan")
+if(NOT YTGST_DEFAULT_RENDERER MATCHES "^(auto|opengl|vulkan)$")
+    message(FATAL_ERROR "YTGST_DEFAULT_RENDERER must be auto, opengl or vulkan")
+endif()
+message(STATUS "Graphics backend: ${YTGST_DEFAULT_RENDERER}")
+
 # Preferred GStreamer video decoder. It is named explicitly in the video chain
 # (see buildPipeline() in src/player.cpp) and its rank is raised, so a build for
 # hardware without it does not fall back to the wrong decoder.
@@ -117,6 +130,7 @@ target_compile_definitions(ytgst PRIVATE
     YTGST_AUDIO_SINK="${YTGST_AUDIO_SINK}"
     YTGST_VIDEO_SINK="${YTGST_VIDEO_SINK}"
     YTGST_VAAPI_DRIVER="${YTGST_VAAPI_DRIVER}"
+    YTGST_DEFAULT_RENDERER="${YTGST_DEFAULT_RENDERER}"
 )
 
 target_include_directories(ytgst PRIVATE

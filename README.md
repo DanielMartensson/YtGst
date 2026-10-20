@@ -71,9 +71,13 @@ not: they live outside the part of the panel that fades.
 
 ## Rendering
 
-- **Vulkan by default.** `src/main.cpp` picks the RHI backend after the
-  application object exists: Vulkan when a Vulkan ICD is installed, otherwise
-  OpenGL and OpenGL ES. `YTGST_RENDERER=opengl` (or `vulkan`) forces one.
+- **The backend is chosen at build time and can be overridden at run time.**
+  `YTGST_DEFAULT_RENDERER=auto|opengl|vulkan` is a CMake option (`auto` unless
+  a recipe says otherwise); `src/main.cpp` then picks the RHI backend after the
+  application object exists. `auto` takes Vulkan when a usable Vulkan 1.2+
+  driver is installed and OpenGL otherwise. `YTGST_RENDERER=opengl|vulkan`
+  overrides the choice for one run. The board build picks **OpenGL**: see the
+  measurements below.
 - **Hardware video decoding.** The decoder is an explicit element in the chain,
   and its rank is raised at startup. On the STM32MP25 that is `v4l2slh264dec`
   (V4L2 stateless H.264); on a PC, `vah264dec` or `nvdec` can be configured.
@@ -88,6 +92,24 @@ not: they live outside the part of the panel that fades.
   that is created again. The picture window is therefore mapped once and stays
   mapped; closing the picture ends the player process instead. This is also why
   the panel is a transient child rather than a window that is shown and hidden.
+
+### Measured on the STM32MP257F
+
+Weston 13, 1280x720 HDMI, 1080p60 HLS stream, three 40 s runs per backend
+(`--watch`, yt-dlp resolving the URL during the first ~17 s of every run):
+
+| backend | panel's first frame | sink buffers | CPU | exit |
+| --- | --- | --- | --- | --- |
+| Vulkan | 4.05 s | 27.3 /s | 46.6 % of a core | 0 |
+| OpenGL | 0.79 s | 28.5 /s | 39.1 % of a core | 0 |
+
+Both backends play the picture at the same rate, because `waylandsink` draws it
+outside the scene graph; the RHI only draws the panel and the search window. The
+difference is the driver's start-up: the VeriSilicon Vulkan driver takes about
+3.3 s longer before the panel's first frame is on screen, and costs ~7 points
+more CPU for the same panel. The board recipe therefore builds with
+`-DYTGST_DEFAULT_RENDERER=opengl`, exactly like NanoBrowser, and Vulkan stays one
+environment variable away.
 
 ## Requirements
 
@@ -160,15 +182,17 @@ is left behind when the search window is closed.
 | `YTGST_AUDIO_SINK` | empty (auto) | Audio sink (`pulsesink`, `pipewiresink`, `alsasink`); empty = first that exists |
 | `YTGST_VIDEO_SINK` | empty (`waylandsink name=gsink`) | Replaces the video sink chain |
 | `YTGST_VAAPI_DRIVER` | empty (auto) | Value for `LIBVA_DRIVER_NAME`, e.g. `i965` or `iHD` |
+| `YTGST_DEFAULT_RENDERER` | `auto` | RHI backend: `auto`, `opengl` or `vulkan`; override per run with `YTGST_RENDERER` |
 
 Every one of them can also be overridden at runtime with an environment variable
-of the same name, for a quick comparison without a rebuild.
+of the same name, for a quick comparison without a rebuild - except the backend,
+which uses `YTGST_RENDERER` (below).
 
 ## Runtime environment
 
 | Variable | Effect |
 | --- | --- |
-| `YTGST_RENDERER=opengl\|vulkan` | Forces the RHI backend |
+| `YTGST_RENDERER=auto\|opengl\|vulkan` | Overrides the build's RHI backend for this run |
 | `YTGST_DEBUG_FPS=1` | Prints how many buffers the video sink consumes per second, and the timestamp of every 120th buffer |
 | `YTGST_NO_AUDIO=1` | Plays the picture alone, to tell a stutter the audio causes from one that is there anyway |
 | `YTGST_HEIGHT=<px>` | Starts at that height instead of the 480p default (the resolution menu overrides it) |

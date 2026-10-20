@@ -41,6 +41,14 @@
 static QString g_graphicsApi = QStringLiteral("OpenGL");
 static QString g_graphicsReason = {};
 
+// Which backend to use when YTGST_RENDERER says nothing. Set at build time
+// (YTGST_DEFAULT_RENDERER), the same way NanoBrowser does it, so a board whose
+// driver prefers one backend does not have to export a variable in every
+// launcher.
+#ifndef YTGST_DEFAULT_RENDERER
+#define YTGST_DEFAULT_RENDERER "auto"
+#endif
+
 static QByteArray rendererFromEnv()
 {
     return qgetenv("YTGST_RENDERER").toLower();
@@ -173,8 +181,9 @@ static void preferVulkanCapablePlatform()
 // so the RHI only affects the window content around it - it does not touch the
 // decoding or the picture itself.
 //
-// Vulkan is the default, like the NanoBrowser/OpenNOW applications on this
-// board: the VeriSilicon driver implements Vulkan 1.3 and Qt Quick's Vulkan
+// The default is chosen at build time (YTGST_DEFAULT_RENDERER, "auto" unless a
+// recipe says otherwise). "auto" takes Vulkan when the driver looks usable,
+// because the VeriSilicon driver implements Vulkan 1.3 and Qt Quick's Vulkan
 // scene graph renders and submits frames on it.
 //
 // An earlier version of this player had to stay on OpenGL: with the picture
@@ -182,25 +191,46 @@ static void preferVulkanCapablePlatform()
 // as it was exposed or restacked - the Qt render thread blocked in the driver
 // while dispatching Wayland events and the GUI thread waited for it. That was a
 // GstGL/interop problem, and it went away with the move to waylandsink, which
-// never enters the scene graph. If a system still turns out to be unable to run
-// the panel on Vulkan, YTGST_RENDERER=opengl forces the old behaviour.
+// never enters the scene graph. Measured on the STM32MP257F, OpenGL is the
+// faster backend for the panel (first frame 0.79 s against 4.06 s, see the
+// README), which is why the board build picks it; YTGST_RENDERER=vulkan|opengl
+// overrides the choice for a run.
+static void useOpenGL(const QString &reason, bool fallback)
+{
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
+    g_graphicsApi = QStringLiteral("OpenGL");
+    g_graphicsReason = reason;
+    qInfo("YtGst: using OpenGL renderer (%s)%s", reason.toUtf8().constData(),
+          fallback ? " - Vulkan was not usable" : "");
+}
+
+static void useVulkan()
+{
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
+    g_graphicsApi = QStringLiteral("Vulkan");
+    g_graphicsReason.clear();
+    qInfo("YtGst: using Vulkan renderer");
+}
+
 static void pickGraphicsApi()
 {
     const QByteArray forced = rendererFromEnv();
+    const QString wanted = forced.isEmpty()
+        ? QStringLiteral(YTGST_DEFAULT_RENDERER)
+        : QString::fromLatin1(forced);
 
-    if (forced == "opengl") {
-        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
-        g_graphicsApi = QStringLiteral("OpenGL");
-        g_graphicsReason = QStringLiteral("forced via YTGST_RENDERER");
-        qInfo("YtGst: using OpenGL renderer (%s)", g_graphicsReason.toUtf8().constData());
+    if (wanted == QLatin1String("opengl")) {
+        useOpenGL(forced.isEmpty() ? QStringLiteral("the build's choice")
+                                   : QStringLiteral("forced via YTGST_RENDERER"),
+                  false);
         return;
     }
 
-    if (unstableVulkanIcdPresent()) {
-        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
-        g_graphicsApi = QStringLiteral("OpenGL");
-        g_graphicsReason = QStringLiteral("unstable Vulkan drivers detected (nouveau/hasvk)");
-        qInfo("YtGst: using OpenGL renderer (unstable Vulkan drivers detected)");
+    // "vulkan" asks for Vulkan even on a driver that the auto path would
+    // reject; "auto" only takes Vulkan when it looks usable.
+    const bool explicitVulkan = (wanted == QLatin1String("vulkan"));
+    if (!explicitVulkan && unstableVulkanIcdPresent()) {
+        useOpenGL(QStringLiteral("unstable Vulkan drivers detected (nouveau/hasvk)"), true);
         return;
     }
 
@@ -212,31 +242,24 @@ static void pickGraphicsApi()
     // only enumerates devices, it never creates one.
     probe.setApiVersion(QVersionNumber(1, 0));
     const bool instanceCreated = probe.create();
-    const bool hardwareSuitable = instanceCreated
-        && vulkanHardwareAvailable(probe);
-    const bool instanceUsable = hardwareSuitable
-        && vulkanInstanceUsable(probe);
-    const bool suitable = instanceUsable;
+    const bool hardwareSuitable = instanceCreated && vulkanHardwareAvailable(probe);
+    const bool instanceUsable = hardwareSuitable && vulkanInstanceUsable(probe);
 
-    const QString vulkanFallbackReason =
-        !instanceCreated
-            ? QStringLiteral("could not create a Vulkan instance")
-            : !hardwareSuitable
-                ? QStringLiteral("no supported Vulkan GPU")
-                : QStringLiteral("Vulkan instance below 1.2 (ICD does not expose vkEnumerateInstanceVersion)");
-
-    if (!suitable) {
-        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGLRhi);
-        g_graphicsApi = QStringLiteral("OpenGL");
-        g_graphicsReason = vulkanFallbackReason;
-        qInfo("YtGst: using OpenGL renderer (%1)", vulkanFallbackReason);
+    // Even an explicit YTGST_RENDERER=vulkan falls back: an instance Qt cannot
+    // use would leave the window without a renderer, and the picture would
+    // still play but the panel would not be drawn.
+    if (!instanceUsable) {
+        const QString reason =
+            !instanceCreated
+                ? QStringLiteral("could not create a Vulkan instance")
+                : !hardwareSuitable
+                    ? QStringLiteral("no supported Vulkan GPU")
+                    : QStringLiteral("Vulkan instance below 1.2 (ICD does not expose vkEnumerateInstanceVersion)");
+        useOpenGL(reason, !explicitVulkan);
         return;
     }
 
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
-    g_graphicsApi = QStringLiteral("Vulkan");
-    g_graphicsReason.clear();
-    qInfo("YtGst: using Vulkan renderer");
+    useVulkan();
 }
 
 // Starts the player as a separate process with its own QQuickWindow/GL context.
@@ -245,6 +268,7 @@ static void pickGraphicsApi()
 // The players are kept as children of this process: a video window must not
 // outlive the window that started it, and a second click on a video replaces
 // the first player instead of stacking another one on top of it.
+
 class Launcher : public QObject
 {
     Q_OBJECT
